@@ -1,0 +1,142 @@
+// src/services/contact-lookup.ts
+// Service untuk lookup kontak berdasarkan nomor HP atau nama.
+// Digunakan untuk inbound caller ID dan outbound notifikasi PIC.
+
+import contactsData from "../config/contacts.json";
+
+export interface Contact {
+  name: string;
+  phone: string;
+  nickname: string;
+  division?: string;
+  role?: string;
+}
+
+// ─── Normalisasi Nomor HP ────────────────────────────────────────────
+
+/**
+ * Normalisasi nomor HP: hapus +, spasi, dash, tanda kurung, dan pastikan format 62xxx.
+ * Contoh: "+62 812-3456-7890" → "6281234567890"
+ */
+export function normalizePhone(phone: string): string {
+  if (!phone) return "";
+  let cleaned = phone.replace(/[\s\-\+\(\)\.]/g, "");
+  // Jika dimulai dengan "0", ganti jadi "62"
+  if (cleaned.startsWith("0")) {
+    cleaned = "62" + cleaned.slice(1);
+  }
+  // Jika dimulai dengan "+62" atau "62", biarkan
+  return cleaned;
+}
+
+// ─── Lookup Functions ────────────────────────────────────────────────
+
+/**
+ * Cari kontak berdasarkan nomor HP (exact match setelah normalisasi).
+ * Digunakan untuk inbound caller ID — identifikasi siapa yang mengirim pesan.
+ *
+ * @param phone Nomor HP dalam format apapun
+ * @returns Object kontak atau null jika tidak ditemukan
+ */
+export function findNameByPhone(phone: string): Contact | null {
+  if (!phone) return null;
+  const normalized = normalizePhone(phone);
+  if (!normalized) return null;
+
+  for (const contact of contactsData as Contact[]) {
+    if (normalizePhone(contact.phone) === normalized) {
+      return contact;
+    }
+  }
+  return null;
+}
+
+/**
+ * Cari nomor HP berdasarkan nama (case-insensitive, partial match).
+ * Digunakan untuk outbound notifikasi — cari nomor PIC untuk dikirimi pesan.
+ *
+ * @param name Nama lengkap, nickname, atau partial name
+ * @returns Object kontak atau null jika tidak ditemukan
+ */
+export function findPhoneByName(name: string): Contact | null {
+  if (!name) return null;
+  const lower = name.toLowerCase().trim();
+  if (!lower) return null;
+
+  for (const contact of contactsData as Contact[]) {
+    // Exact match nama lengkap
+    if (contact.name.toLowerCase() === lower) {
+      return contact;
+    }
+    // Exact match nickname
+    if (contact.nickname.toLowerCase() === lower) {
+      return contact;
+    }
+  }
+
+  // Partial match: nama input mengandung nama kontak atau sebaliknya
+  for (const contact of contactsData as Contact[]) {
+    const contactLower = contact.name.toLowerCase();
+    const nickLower = contact.nickname.toLowerCase();
+
+    if (contactLower.includes(lower) || lower.includes(contactLower)) {
+      return contact;
+    }
+    if (nickLower.includes(lower) || lower.includes(nickLower)) {
+      return contact;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Dapatkan display name berdasarkan nomor HP.
+ * Prioritas: nickname > name > nomor HP terformat.
+ * Digunakan untuk greeting pesan masuk.
+ *
+ * @param phone Nomor HP
+ * @returns Nama untuk ditampilkan
+ */
+export function getDisplayName(phone: string): string {
+  const contact = findNameByPhone(phone);
+  if (!contact) {
+    // Format nomor HP: 6281234567890 → 0812-3456-7890
+    const normalized = normalizePhone(phone);
+    if (normalized.length >= 10) {
+      return `0${normalized.slice(2, 5)}-${normalized.slice(5, 9)}-${normalized.slice(9)}`;
+    }
+    return phone;
+  }
+  // Gunakan nickname kalau ada, kalau tidak pakai first name
+  if (contact.nickname) {
+    return contact.nickname.charAt(0).toUpperCase() + contact.nickname.slice(1);
+  }
+  return contact.name.split(" ")[0];
+}
+
+/**
+ * Dapatkan nama lengkap berdasarkan nomor HP.
+ * Digunakan untuk notifikasi PIC (butuh nama lengkap, bukan nickname).
+ *
+ * @param phone Nomor HP
+ * @returns Nama lengkap atau null jika tidak ditemukan
+ */
+export function getFullName(phone: string): string | null {
+  const contact = findNameByPhone(phone);
+  return contact ? contact.name : null;
+}
+
+/**
+ * Return semua kontak yang terdaftar.
+ */
+export function getAllContacts(): Contact[] {
+  return contactsData as Contact[];
+}
+
+/**
+ * Cek apakah nomor HP dikenali (terdaftar di contacts).
+ */
+export function isKnownContact(phone: string): boolean {
+  return findNameByPhone(phone) !== null;
+}

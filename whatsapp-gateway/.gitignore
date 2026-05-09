@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.env
+*.log
+.DS_Store
+qr.html
+qrcode.png
+.qrcode.png
+
+# Cloudflare Tunnel credentials (JANGAN commit)
+.cloudflared/

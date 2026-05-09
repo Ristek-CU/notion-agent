@@ -1,0 +1,122 @@
+services:
+  # ============================================================
+  # POSTGRES — Database untuk Evolution API
+  # ============================================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: wa-postgres
+    restart: always
+    environment:
+      - POSTGRES_USER=evolution
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-evolution123}
+      - POSTGRES_DB=evolution
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U evolution -d evolution"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - wa-bot-network
+
+  # ============================================================
+  # ORCHESTRATOR — Bot + AI Agent + Notion API Client
+  # ============================================================
+  orchestrator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: wa-orchestrator
+    restart: always
+    ports:
+      - "${ORCHESTRATOR_PORT:-3000}:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      # AI (Anthropic SDK via z.ai proxy)
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL:-https://api.z.ai/api/anthropic}
+      - AI_MODEL=${AI_MODEL:-claude-sonnet-4-20250514}
+      # Notion Organization
+      - NOTION_API_KEY=${NOTION_API_KEY}
+      - NOTION_DATABASE_ID=${NOTION_DATABASE_ID}
+      - NOTION_MASTER_BACKLOG_ID=${NOTION_MASTER_BACKLOG_ID}
+      - NOTION_MASTER_PROJECTS_ID=${NOTION_MASTER_PROJECTS_ID}
+      - NOTION_DIVISIONS_ID=${NOTION_DIVISIONS_ID}
+      - NOTION_MEMBERS_ID=${NOTION_MEMBERS_ID}
+      - NOTION_VERSION=2022-06-28
+      # Evolution API (internal — pakai Docker network)
+      - EVOLUTION_API_URL=http://wa-evolution-api:8080
+      - EVOLUTION_API_KEY=${EVOLUTION_API_KEY}
+      - EVOLUTION_INSTANCE_NAME=${EVOLUTION_INSTANCE_NAME:-wa-bot}
+      # Redis
+      - REDIS_URL=redis://redis:6379
+      # Public URL (optional — hanya kalau mau expose ke internet)
+      - PUBLIC_URL=${PUBLIC_URL:-http://localhost:3000}
+    volumes:
+      - lid_cache:/app/cache
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - wa-bot-network
+
+  # ============================================================
+  # REDIS — Queue + Session
+  # ============================================================
+  redis:
+    image: redis:7-alpine
+    container_name: wa-redis
+    restart: always
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    volumes:
+      - redis_data:/data
+    networks:
+      - wa-bot-network
+
+  # ============================================================
+  # EVOLUTION API — WhatsApp Gateway (v1.8.7 + @lid patch)
+  # ============================================================
+  evolution-api:
+    image: atendai/evolution-api:v1.8.7
+    container_name: wa-evolution-api
+    restart: always
+    ports:
+      - "${EVOLUTION_PORT:-8080}:8080"
+    environment:
+      - SERVER_TYPE=http
+      - SERVER_PORT=8080
+      - SERVER_URL=http://wa-evolution-api:8080
+      - DATABASE_PROVIDER=postgresql
+      - DATABASE_CONNECTION_URI=postgresql://evolution:${POSTGRES_PASSWORD:-evolution123}@wa-postgres:5432/evolution?schema=public
+      - DATABASE_SAVE_DATA_INSTANCE=true
+      - DATABASE_SAVE_DATA_NEW_MESSAGE=true
+      - AUTHENTICATION_API_KEY=${EVOLUTION_API_KEY}
+      - PROVIDER_ENABLED=false
+      - LOG_LEVEL=WARN
+    volumes:
+      - evolution_store:/evolution/store
+      - evolution_instances:/evolution/instances
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - wa-bot-network
+
+volumes:
+  postgres_data:
+  redis_data:
+  evolution_store:
+  evolution_instances:
+  lid_cache:
+
+networks:
+  wa-bot-network:
+    driver: bridge

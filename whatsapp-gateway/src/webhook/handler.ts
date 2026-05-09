@@ -5,7 +5,7 @@ import { replyToGroup, sendDirectMessage, fetchBotJid, lookupLidCache } from "..
 import { env } from "../config.js";
 import { appendImageBlock, invalidateCache } from "../notion/notion-api-core.js";
 import { searchBacklog } from "../notion/notion-org-service.js";
-import { getSenderDisplayName } from "../services/notification.js";
+import { resolveDisplayName } from "../services/contact-lookup.js";
 
 // ─── Types ──────────────────────────────────────────────────────────
 
@@ -213,7 +213,8 @@ export async function registerWebhookRoutes(app: FastifyInstance) {
 
     // Extract sender phone number for contact lookup
     const senderPhone = extractPhoneNumber(rawJid, payload);
-    const displayName = senderPhone ? getSenderDisplayName(senderPhone) : pushName;
+    // Resolve display name: prioritas kontak DB (by phone/by pushName) > WhatsApp pushName
+    const displayName = resolveDisplayName(senderPhone, pushName);
 
     console.log(
       `[Webhook] ${isGroup ? "GROUP" : "DM"} from ${displayName}${isBotMentioned ? " (mentioned)" : ""}: ${cleanText.slice(0, 100)}`
@@ -322,7 +323,8 @@ export async function registerWebhookRoutes(app: FastifyInstance) {
 
     const replyTarget = resolveReplyTarget(rawJid, isGroup, payload);
     const senderPhone = extractPhoneNumber(rawJid, payload);
-    const displayName = senderPhone ? getSenderDisplayName(senderPhone) : pushName;
+    // Resolve display name: prioritas kontak DB (by phone/by pushName) > WhatsApp pushName
+    const displayName = resolveDisplayName(senderPhone, pushName);
 
     console.log(`[Webhook] Wildcard - ${isGroup ? "GROUP" : "DM"} from ${displayName}${isBotMentioned ? " (mentioned)" : ""}`);
 

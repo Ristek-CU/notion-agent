@@ -128,6 +128,82 @@ export function getFullName(phone: string): string | null {
 }
 
 /**
+ * Cari kontak berdasarkan pushName WhatsApp (case-insensitive, partial match).
+ * Digunakan sebagai fallback kalau nomor HP gak bisa di-extract (misal @lid).
+ * Mencoba match terhadap name, nickname, dan first name.
+ *
+ * @param pushName Nama yang dikirim WhatsApp (display name user)
+ * @returns Object kontak atau null jika tidak ditemukan
+ */
+export function findContactByPushName(pushName: string): Contact | null {
+  if (!pushName || pushName === "Unknown") return null;
+  const lower = pushName.toLowerCase().trim();
+  if (!lower) return null;
+
+  // 1. Exact match nickname
+  for (const contact of contactsData as Contact[]) {
+    if (contact.nickname.toLowerCase() === lower) {
+      return contact;
+    }
+  }
+
+  // 2. Exact match full name
+  for (const contact of contactsData as Contact[]) {
+    if (contact.name.toLowerCase() === lower) {
+      return contact;
+    }
+  }
+
+  // 3. Push name contains first name or vice versa
+  for (const contact of contactsData as Contact[]) {
+    const firstName = contact.name.split(" ")[0].toLowerCase();
+    const nickLower = contact.nickname.toLowerCase();
+
+    // pushName matches first name
+    if (firstName === lower) return contact;
+    // pushName contains nickname or vice versa
+    if (nickLower.includes(lower) || lower.includes(nickLower)) return contact;
+    // pushName contains first name or vice versa
+    if (firstName.includes(lower) || lower.includes(firstName)) return contact;
+  }
+
+  return null;
+}
+
+/**
+ * Dapatkan display name yang paling akurat.
+ * Prioritas: contact by phone > contact by pushName > pushName WhatsApp.
+ *
+ * @param phone Nomor HP (bisa null)
+ * @param pushName Nama WhatsApp dari payload
+ * @returns Nama untuk ditampilkan
+ */
+export function resolveDisplayName(phone: string | null, pushName: string): string {
+  // 1. Coba lookup via nomor HP (paling akurat)
+  if (phone) {
+    const contact = findNameByPhone(phone);
+    if (contact) {
+      if (contact.nickname) {
+        return contact.nickname.charAt(0).toUpperCase() + contact.nickname.slice(1);
+      }
+      return contact.name.split(" ")[0];
+    }
+  }
+
+  // 2. Coba lookup via pushName terhadap database kontak
+  const contactByPushName = findContactByPushName(pushName);
+  if (contactByPushName) {
+    if (contactByPushName.nickname) {
+      return contactByPushName.nickname.charAt(0).toUpperCase() + contactByPushName.nickname.slice(1);
+    }
+    return contactByPushName.name.split(" ")[0];
+  }
+
+  // 3. Fallback: pakai pushName WhatsApp apa adanya
+  return pushName || "Unknown";
+}
+
+/**
  * Return semua kontak yang terdaftar.
  */
 export function getAllContacts(): Contact[] {

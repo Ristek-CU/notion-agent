@@ -108,11 +108,8 @@ export function getDisplayName(phone: string): string {
     }
     return phone;
   }
-  // Gunakan nickname kalau ada, kalau tidak pakai first name
-  if (contact.nickname) {
-    return contact.nickname.charAt(0).toUpperCase() + contact.nickname.slice(1);
-  }
-  return contact.name.split(" ")[0];
+  // Return nama lengkap dari database contacts
+  return contact.name;
 }
 
 /**
@@ -183,20 +180,14 @@ export function resolveDisplayName(phone: string | null, pushName: string): stri
   if (phone) {
     const contact = findNameByPhone(phone);
     if (contact) {
-      if (contact.nickname) {
-        return contact.nickname.charAt(0).toUpperCase() + contact.nickname.slice(1);
-      }
-      return contact.name.split(" ")[0];
+      return contact.name;
     }
   }
 
   // 2. Coba lookup via pushName terhadap database kontak
   const contactByPushName = findContactByPushName(pushName);
   if (contactByPushName) {
-    if (contactByPushName.nickname) {
-      return contactByPushName.nickname.charAt(0).toUpperCase() + contactByPushName.nickname.slice(1);
-    }
-    return contactByPushName.name.split(" ")[0];
+    return contactByPushName.name;
   }
 
   // 3. Fallback: pakai pushName WhatsApp apa adanya

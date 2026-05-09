@@ -9,3 +9,6 @@ qrcode.png
 
 # Cloudflare Tunnel credentials (JANGAN commit)
 .cloudflared/
+
+# Data kontak internal (mengandung nomor HP sensitif)
+src/config/contacts.json

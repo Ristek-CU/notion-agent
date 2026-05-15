@@ -1,697 +1,838 @@
-# Technical Implementation Guide
-## WhatsApp Service Gateway (WSG)
+# Technical Implementation Reference
+
+## Oro Bot — WhatsApp-to-Notion Gateway
+
+> Developer reference for the Oro Bot codebase. Covers source structure, module internals, data flow, error handling, logging, and configuration.
 
 ---
 
-## 1. Technology Stack Decision
+## 1. Technology Stack
 
-| Layer | Technology | Version | Why |
-|-------|-----------|---------|-----|
-| **Runtime** | Node.js | 20 LTS | Stable, good async, large ecosystem |
-| **Language** | TypeScript | 5.x | Type safety, better DX, fewer runtime bugs |
-| **Framework** | Fastify | 5.x | Faster than Express, schema validation built-in |
-| **AI SDK** | @anthropic-ai/sdk | latest | Official Claude SDK |
-| **WhatsApp** | Twilio SDK | latest | Easiest WhatsApp integration, sandbox for testing |
-| **Database** | PostgreSQL | 16 | ACID, JSONB support, proven reliability |
-| **ORM** | Drizzle ORM | latest | Type-safe, lightweight, good DX |
-| **Cache** | Redis | 7 | Session, queue, caching |
-| **Queue** | BullMQ | latest | Redis-based, reliable job queue |
-| **Testing** | Vitest | latest | Fast, TypeScript-native |
-| **Linting** | ESLint + Prettier | latest | Code quality |
-| **Deployment** | Docker + Compose | latest | Consistent environments |
-| **CI/CD** | GitHub Actions | latest | Automation |
+| Layer | Technology | Purpose |
+|-------|-----------|---------|
+| **Runtime** | Node.js 20 LTS | Async I/O, event loop |
+| **Language** | TypeScript 5.x | Type safety across all modules |
+| **Framework** | Fastify 5.x | HTTP server, webhook receiver |
+| **AI SDK** | @anthropic-ai/sdk | Claude API via z.ai proxy |
+| **AI Model** | claude-sonnet-4-20250514 | Intent extraction, chat, casual wrapping |
+| **Notion API** | REST (direct) | All CRUD operations on Notion workspace |
+| **MCP** | @modelcontextprotocol/sdk | Optional Notion MCP Server (stdio, fallback) |
+| **WhatsApp** | Evolution API v1.8+/v2.x | Send/receive WhatsApp messages |
+| **Validation** | Zod | Environment variable schema validation |
+| **Session** | In-memory Map | Per-user conversation context (30-min TTL) |
+| **Caching** | In-memory Map with TTL | Notion API response caching |
+| **Contacts** | Static JSON (contacts.json) | Phone-to-name resolution for outbound notifications |
 
-## 2. Project Structure
+---
+
+## 2. Source File Structure
 
 ```
-whatsapp-gateway/
-├── src/
-│   ├── index.ts                    # App entry point
-│   ├── config/
-│   │   ├── index.ts                # Config loader
-│   │   └── schema.ts               # Config validation (zod)
-│   ├── webhook/
-│   │   ├── server.ts               # Fastify server setup
-│   │   ├── routes.ts               # Webhook routes
-│   │   ├── verify.ts               # Signature verification
-│   │   └── dto.ts                  # Message data transfer objects
-│   ├── ai/
-│   │   ├── client.ts               # Claude SDK client
-│   │   ├── classifier.ts           # Intent classification
-│   │   ├── entity-extractor.ts     # Entity extraction
-│   │   ├── prompts/
-│   │   │   ├── system.ts           # System prompt
-│   │   │   ├── intent.ts           # Intent classification prompt
-│   │   │   └── response.ts         # Response generation prompt
-│   │   └── types.ts                # AI types
-│   ├── controller/
-│   │   ├── orchestrator.ts         # Main orchestrator
-│   │   ├── router.ts               # MCP router
-│   │   ├── response-builder.ts     # Response formatting
-│   │   ├── session-manager.ts      # Session management
-│   │   └── state-machine.ts        # Request state machine
-│   ├── mcp/
-│   │   ├── core/
-│   │   │   ├── interface.ts        # MCP interface definition
-│   │   │   ├── registry.ts         # MCP registry
-│   │   │   ├── client.ts           # MCP HTTP client
-│   │   │   └── types.ts            # Shared types
-│   │   ├── akademik/
-│   │   │   ├── index.ts
-│   │   │   ├── server.ts
-│   │   │   ├── actions/
-│   │   │   │   ├── get-profile.ts
-│   │   │   │   ├── get-grades.ts
-│   │   │   │   ├── get-schedule.ts
-│   │   │   │   └── get-krs.ts
-│   │   │   ├── adapters/
-│   │   │   │   └── siakad-client.ts
-│   │   │   └── transformers/
-│   │   │       └── grade-transform.ts
-│   │   ├── admisi/
-│   │   │   └── ... (same structure)
-│   │   ├── inventory/
-│   │   │   └── ... (same structure)
-│   │   └── it-support/
-│   │       └── ... (same structure)
-│   ├── db/
-│   │   ├── index.ts                # DB connection
-│   │   ├── schema.ts               # Drizzle schema
-│   │   └── migrations/             # SQL migrations
-│   ├── queue/
-│   │   ├── index.ts                # BullMQ setup
-│   │   ├── processor.ts            # Job processor
-│   │   └── workers/
-│   │       ├── message-processor.ts
-│   │       └── notification-worker.ts
-│   ├── services/
-│   │   ├── whatsapp.ts             # WhatsApp send/receive service
-│   │   ├── user-service.ts         # User management
-│   │   └── ticket-service.ts       # Ticket management
-│   └── utils/
-│       ├── logger.ts               # Structured logging
-│       ├── errors.ts               # Custom errors
-│       └── helpers.ts              # Utility functions
-├── tests/
-│   ├── unit/
-│   ├── integration/
-│   └── e2e/
-├── docker/
-│   ├── Dockerfile
-│   ├── Dockerfile.mcp
-│   └── docker-compose.yml
-├── docs/                           # Documentation
-├── scripts/
-│   ├── setup.sh                    # Setup script
-│   └── seed.ts                     # DB seed script
-├── .env.example
-├── package.json
-├── tsconfig.json
-├── vitest.config.ts
-└── README.md
+src/
+├── index.ts                  # Fastify server entry point (port 3000)
+├── config.ts                 # Zod-validated environment configuration (19 env vars)
+├── ai/
+│   ├── agent.ts              # Main AI agent (2670 lines) — message routing, commands, smart messages
+│   ├── anthropic-client.ts   # Anthropic SDK wrapper via z.ai proxy (167 lines)
+│   └── prompts.ts            # System prompts (433 lines) — EXTRACTION, CHAT, CASUAL_WRAP
+├── notion/
+│   ├── notion-api-core.ts    # Core Notion API client (728 lines) — retry, rate limiting, caching, pagination
+│   ├── notion-org-service.ts # Organization data service (1320 lines) — backlog, projects, divisions, members
+│   └── ticket-service.ts     # Ticket CRUD operations (375 lines)
+├── mcp/
+│   └── notion-client.ts      # MCP client for Notion (106 lines) — lazy init, stdio transport, fallback
+├── services/
+│   ├── session-manager.ts    # In-memory session management (368 lines) — 30-min TTL, follow-up detection
+│   ├── contact-lookup.ts     # Phone number normalization and name lookup (209 lines)
+│   └── notification.ts       # Outbound WA notification service (124 lines)
+├── wa/
+│   └── sender.ts             # WhatsApp message sender via Evolution API (489 lines) — LID resolution
+├── webhook/
+│   └── handler.ts            # Webhook processing pipeline (575 lines) — dedup, rate limit, routing
+└── utils/
+    ├── helpers.ts            # Utility functions (79 lines) — ticket ID gen, JSON extraction
+    └── message-template.ts   # Message formatting templates (71 lines)
 ```
 
-## 3. Core Implementation
+---
 
-### 3.1 Config & Environment
+## 3. Module Details
 
-```typescript
-// src/config/schema.ts
-import { z } from 'zod';
+### 3.1 `src/index.ts` — Entry Point
 
-export const configSchema = z.object({
-  // Server
-  PORT: z.coerce.number().default(3000),
-  NODE_ENV: z.enum(['development', 'staging', 'production']).default('development'),
+The application bootstrap. Creates a Fastify server, initializes the bot JID for group mention detection, registers webhook routes, and sets up graceful shutdown handlers.
 
-  // Twilio / WhatsApp
-  TWILIO_ACCOUNT_SID: z.string().min(1),
-  TWILIO_AUTH_TOKEN: z.string().min(1),
-  TWILIO_PHONE_NUMBER: z.string().min(1),
-  TWILIO_WEBHOOK_URL: z.string().url().optional(),
+**Startup sequence:**
+1. Log environment info (NODE_ENV, PORT, AI_MODEL, EVOLUTION_API_URL, INSTANCE_NAME)
+2. Create Fastify instance with environment-aware log level (`debug` in development, `info` in production)
+3. `initBotJid()` — fetch the bot's own WhatsApp JID from Evolution API for later mention detection
+4. `registerWebhookRoutes(app)` — mount all HTTP routes
+5. Listen on `0.0.0.0:{PORT}`
 
-  // AI
-  ANTHROPIC_API_KEY: z.string().min(1),
-  AI_MODEL: z.string().default('claude-haiku-4-5-20251001'),
-  AI_MAX_TOKENS: z.coerce.number().default(500),
-  AI_CONFIDENCE_THRESHOLD: z.coerce.number().min(0).max(1).default(0.7),
+**Graceful shutdown:** On SIGINT/SIGTERM, closes the MCP client connection, then closes Fastify.
 
-  // Database
-  DATABASE_URL: z.string().url().default('postgresql://localhost:5432/wsg'),
+**Key references:** `src/index.ts:1-56`
 
-  // Redis
-  REDIS_URL: z.string().default('redis://localhost:6379'),
+---
 
-  // MCP
-  MCP_AKADEMIK_URL: z.string().default('http://localhost:3001'),
+### 3.2 `src/config.ts` — Configuration
 
-  // Limits
-  RATE_LIMIT_PER_MINUTE: z.coerce.number().default(30),
-  REQUEST_TIMEOUT_MS: z.coerce.number().default(10000),
-});
+Zod schema validation for all environment variables. Loaded once at startup via `dotenv`.
 
-export type Config = z.infer<typeof configSchema>;
+**Schema (19 variables):**
+
+| Variable | Type | Default | Purpose |
+|----------|------|---------|---------|
+| `NODE_ENV` | `enum["development","production"]` | `"development"` | Environment mode |
+| `PORT` | `number` | `3000` | HTTP server port |
+| `ANTHROPIC_API_KEY` | `string` (required) | — | API key for z.ai proxy |
+| `ANTHROPIC_BASE_URL` | `string` | `"https://api.z.ai/api/anthropic"` | z.ai proxy endpoint |
+| `AI_MODEL` | `string` | `"claude-sonnet-4-20250514"` | Claude model identifier |
+| `NOTION_API_KEY` | `string` (required) | — | Notion integration token |
+| `NOTION_DATABASE_ID` | `string` (required) | — | Master Backlog database ID |
+| `NOTION_VERSION` | `string` | `"2022-06-28"` | Notion API version header |
+| `NOTION_MASTER_PROJECTS_ID` | `string` (optional) | — | Master Projects database ID |
+| `NOTION_MASTER_BACKLOG_ID` | `string` (optional) | — | Master Backlog database ID (alternative) |
+| `NOTION_DIVISIONS_ID` | `string` (optional) | — | Divisions database ID |
+| `NOTION_MEMBERS_ID` | `string` (optional) | — | Members database ID |
+| `EVOLUTION_API_URL` | `string` | `"http://evolution-api:8080"` | Evolution API base URL |
+| `EVOLUTION_API_KEY` | `string` | `"evolution-api-key-change-this"` | Evolution API authentication key |
+| `EVOLUTION_INSTANCE_NAME` | `string` | `"wa-bot"` | WhatsApp instance identifier |
+| `REDIS_URL` | `string` | `"redis://redis:6379"` | Redis connection URL (reserved) |
+| `CACHE_TTL_BACKLOG_MS` | `number` | `120000` (2 min) | Backlog cache TTL |
+| `CACHE_TTL_PROJECTS_MS` | `number` | `300000` (5 min) | Projects cache TTL |
+| `CACHE_TTL_MEMBERS_MS` | `number` | `600000` (10 min) | Members cache TTL |
+| `CACHE_TTL_RELATIONS_MS` | `number` | `600000` (10 min) | Relation cache TTL |
+| `NOTION_RATE_LIMIT_RPS` | `number` | `3` | Notion API rate limit (requests/sec) |
+| `NOTION_MAX_RETRIES` | `number` | `3` | Max retry attempts for Notion API |
+
+**Key references:** `src/config.ts:1-46`
+
+---
+
+### 3.3 `src/ai/agent.ts` — Main AI Agent
+
+The central message processing module at 2670 lines. Handles all message routing, command parsing, AI-powered intent detection, ticket creation, backlog queries, and conversation state management.
+
+#### 3.3.1 Exports
+
+- `handleMessage(message, context)` — main entry point called by the webhook handler
+- `handleChat(message, context)` — general AI chat fallback
+- `MessageContext` interface — phone number, push name, group flag, mention flag
+
+#### 3.3.2 Message Processing Pipeline
+
+```
+Incoming message
+    │
+    ├─ 1. Load/create session (session-manager)
+    │
+    ├─ 2. parseCommand() — regex-based command parser
+    │     ├─ Match found → handleCommand() → addCasualTouch() → return
+    │     └─ No match → continue
+    │
+    ├─ 3. Group + bot mentioned? → handleSmartMessage()
+    │
+    ├─ 4. Group + NOT mentioned? → return "" (ignore)
+    │
+    └─ 5. DM → handleSmartMessage()
 ```
 
-### 3.2 Webhook Server
+#### 3.3.3 `parseCommand()` — Command Parser
 
-```typescript
-// src/webhook/server.ts
-import Fastify from 'fastify';
-import { webhookRoutes } from './routes';
-import { config } from '../config';
+Regex-based parser supporting 30+ commands. Commands are matched in priority order — more specific patterns are checked first.
 
-const app = Fastify({ logger: true });
+**Supported commands:**
 
-app.register(webhookRoutes);
+| Command Pattern | Internal Name | Description |
+|----------------|---------------|-------------|
+| `!projects`, `!project list` | `project_list` | List all projects |
+| `!project <name>` | `project_info` | Get project details |
+| `!backlog search <query>` | `backlog_search` | Search backlog items |
+| `!backlog division <name>` | `backlog_division` | Backlog by division |
+| `!backlog status <value>` | `backlog_status` | Backlog by status |
+| `!backlog update <name> status/priority <value>` | `backlog_update` | Update backlog item |
+| `!backlog delete <name>` | `backlog_delete` | Archive backlog item |
+| `!backlog restore <name>` | `backlog_restore` | Restore archived item |
+| `!backlog bulk <from> to <to> [div]` | `backlog_bulk` | Bulk status update |
+| `!detail <name/ID>` | `ticket_detail` | Full ticket detail |
+| `!note <ticket> <text>` | `ticket_note` | Add note to ticket |
+| `!comment <ticket> <text>` | `ticket_comment` | Add comment to ticket |
+| `!members [division]` | `members_list` | List members |
+| `!divisions` | `divisions_list` | List all divisions |
+| `!tugas <name>` | `member_tasks` | Tasks by member |
+| `!pic <ticket> <member>` | `assign_pic` | Assign PIC to backlog |
+| `!removepic <ticket> <member>` | `unassign_pic` | Remove PIC |
+| `!refresh`, `!sync` | `cache_refresh` | Force cache refresh |
+| `!list [dept]` | `list_all` / `list_dept` | List backlog items |
+| `!help`, `!bantuan` | `show_help` | Help text |
+| `!stats`, `!statistik` | `show_stats` | Backlog statistics |
+| `!close <TK-ID>` | `close_ticket` | Close ticket (set Done) |
+| `!delete <TK-ID>` | `delete_ticket` | Archive ticket |
+| `!assign <TK-ID> <name>` | `assign_ticket` | Assign person to ticket |
+| `!update <TK-ID> <field> <value>` | `update_ticket` | Update ticket field |
+| `!db create <name> in <parent>` | `db_create` | Create Notion database |
+| `!db schema <id>` | `db_schema` | Get database schema |
+| `!subpage <parent> <title>` | `subpage_create` | Create sub-page |
+| `!image <ticket> <url>` | `ticket_image` | Attach image to ticket |
+| `status/cek/info <TK-ID>` | `check_status` | Check ticket status |
 
-export async function startWebhookServer() {
-  try {
-    await app.listen({ port: config.PORT, host: '0.0.0.0' });
-    console.log(`Webhook server running on port ${config.PORT}`);
-  } catch (err) {
-    app.log.error(err);
-    process.exit(1);
-  }
-}
+**Key references:** `src/ai/agent.ts:211-406`
+
+#### 3.3.4 `handleSmartMessage()` — AI-Powered Intent Detection
+
+For messages that don't match any command pattern, this function performs multi-layered intent detection:
+
+1. **Follow-up detection** — checks if message references previous conversation context via `session-manager.detectFollowUp()`
+2. **Greeting detection** — short messages matching greeting patterns trigger a time-aware greeting
+3. **Pending ticket state** — checks for unresolved PIC names from a previous ticket creation attempt
+4. **Broadcast intent** — regex patterns detect mass notification requests
+5. **Member name extraction** — parses specific member names from message text (priority over self-reference)
+6. **Self-reference detection** — detects "tugas gw", "backlog saya" patterns and resolves sender's tasks via contact lookup
+7. **Stats/Project/List/Help/Divisions/Members intent** — keyword-based detection for common intents
+8. **Creation intent** — "buat tiket", "bikin backlog" triggers AI extraction
+9. **Query keyword detection** — reading-intent keywords trigger `handleQuery()`
+10. **AI extraction** — last resort: sends message to Claude for classification (`is_ticket`, `is_query`, or neither)
+
+**Key references:** `src/ai/agent.ts:687-1156`
+
+#### 3.3.5 `handleCreateTicket()` — Ticket Creation
+
+Creates a Notion page in the Master Backlog database:
+
+1. Extract fields from AI-parsed ticket data (judul, deskripsi, divisi, project, pics, prioritas, dueDate, reviewedBy, status)
+2. Resolve division/project/member names to Notion page IDs via alias resolution and database lookups
+3. If any PIC names cannot be resolved, save conversation state to `pendingTickets` Map and ask user for clarification
+4. Call `createTicketDirect()` to create the Notion page
+5. Send WhatsApp notifications to all resolved PICs via `notifyPIC()` (async, non-blocking via `setImmediate`)
+6. Return confirmation with Notion URL
+
+**Pending ticket state:** Stored in an in-memory Map keyed by phone number, with a 5-minute TTL. Cleaned up every 60 seconds.
+
+**Key references:** `src/ai/agent.ts:1225-1407`
+
+#### 3.3.6 `handleFollowUpQuestion()` — Context-Aware Follow-Up
+
+Handles follow-up messages that reference previous conversation context:
+
+- **Confirmation** — "ya", "tidak", "ok", "bisa" responses
+- **Continuation** — "terus gimana", "lalu gimana"
+- **Detail questions** — "di akun apa", "deadline kapan", "siapa pic", "statusnya", "linknya", "projectnya", "divisinya", "prioritasnya"
+- **Update request** — "ubah statusnya", "ganti pic"
+- Falls through to normal detection if unable to answer
+
+**Key references:** `src/ai/agent.ts:527-683`
+
+#### 3.3.7 `addCasualTouch()` — AI Personality Wrapper
+
+Wraps formal command responses with a casual Oro personality using the `CASUAL_WRAP_PROMPT`. Skips wrapping for short messages (<30 chars) and help text. Falls back to a simple prefix if AI fails.
+
+**Key references:** `src/ai/agent.ts:161-191`
+
+#### 3.3.8 `handleBroadcastTaskNotifications()` — Mass Notification
+
+Iterates over all contacts, queries Notion for each member's active tasks, and sends personalized WhatsApp notifications. Includes 1-second delay between sends to avoid WhatsApp spam detection.
+
+**Key references:** `src/ai/agent.ts:2145-2242`
+
+---
+
+### 3.4 `src/ai/anthropic-client.ts` — Anthropic SDK Wrapper
+
+Wraps the Anthropic SDK for communication with Claude via the z.ai proxy.
+
+**Configuration:**
+- Base URL: `ANTHROPIC_BASE_URL` (default: `https://api.z.ai/api/anthropic`)
+- Model: `claude-sonnet-4-20250514`
+- Default max tokens: 1024 (overridable per call)
+- Max retries: 3 with exponential backoff (2s, 5s, 10s)
+
+**Retry logic:**
+- Retries on HTTP 429 (rate limited) and 5xx (server error)
+- Does NOT retry on 4xx client errors
+
+**AI Call Logging:**
+- Every API call is logged to `logs/ai-calls.csv` with: timestamp, model, input/output tokens, inference time, caller function name
+- Caller detection via stack trace inspection (identifies which agent.ts function initiated the call)
+- Cumulative stats tracked in-memory: total calls, total tokens, average inference time
+
+**Exports:**
+- `createMessage(messages, options?)` — send messages to Claude, returns `AnthropicResponse`
+- `getAIStats()` — returns cumulative AI call statistics
+
+**Key references:** `src/ai/anthropic-client.ts:1-167`
+
+---
+
+### 3.5 `src/ai/prompts.ts` — System Prompts
+
+Four prompts used across the AI pipeline:
+
+#### `SYSTEM_PROMPT`
+Defines Oro's personality, capabilities, and rules. Lists all 12 divisions with aliases, priority levels, and anti-loop rules (no double confirmation).
+
+#### `EXTRACTION_PROMPT`
+Used for intent classification and data extraction. Classifies messages into:
+- `is_query: true` — reading/querying data (returns query_type, division, status, search)
+- `is_ticket: true` — creating a ticket (returns judul, deskripsi, departemen, prioritas, pics, project, status, deadline, reviewedBy)
+- `is_ticket: false` — general chat (returns reply or empty string)
+
+Includes complete lists of divisions (with aliases), projects (20+), and members (100+ with nicknames) for accurate entity resolution.
+
+#### `CHAT_PROMPT`
+General conversation prompt with `{pushName}` and `{message}` placeholders. Defines scope boundaries (only ticket/backlog/Notion-related tasks) and execution rules (fast execution, no confirmation loops).
+
+#### `CASUAL_WRAP_PROMPT`
+Lightweight prompt that adds a casual touch to formal system responses without modifying the data content. Output must preserve all formatting (bold, links, etc.).
+
+#### `CASUAL_ERROR_PROMPT`
+Generates friendly error messages from technical error details.
+
+**Key references:** `src/ai/prompts.ts:1-433`
+
+---
+
+### 3.6 `src/notion/notion-api-core.ts` — Core Notion API Client
+
+Low-level Notion API client providing retry logic, rate limiting, caching, and auto-pagination. All Notion API calls from other modules go through this layer.
+
+#### Rate Limiter
+- Sliding window algorithm: 3 requests per 1-second window
+- Configurable via `NOTION_RATE_LIMIT_RPS` env var
+- Waits before making request if window is full
+
+#### Cache Layer
+- In-memory `Map<string, CacheEntry>` with TTL
+- Default TTL: 5 minutes (overridable per call)
+- Cache invalidation by prefix or exact key
+- Only caches GET-like operations (database queries, page reads)
+
+#### Retry Logic
+- Max 3 retries with exponential backoff (1s, 3s, 6s)
+- Retries on: HTTP 429 (respects Retry-After header), 5xx server errors, network errors
+- Does NOT retry on 4xx client errors (except 429)
+- Configurable max retries via options
+
+#### Auto-Pagination
+- `queryDatabaseAll()` — fetches all pages from a database query, handling `has_more`/`next_cursor` automatically
+- Safety limit: 50 pages (5000 results) to prevent runaway pagination
+- `getBlockChildren()` — paginated block retrieval with same safety limits
+
+#### API Operations
+
+| Function | Method | Endpoint | Description |
+|----------|--------|----------|-------------|
+| `notionRequest()` | Any | Any | Generic request with retry/rate-limit |
+| `queryDatabaseAll()` | POST | `/databases/{id}/query` | Auto-paginated database query |
+| `queryDatabasePage()` | POST | `/databases/{id}/query` | Single-page query |
+| `getPage()` | GET | `/pages/{id}` | Get page by ID |
+| `createPage()` | POST | `/pages` | Create new page |
+| `updatePage()` | PATCH | `/pages/{id}` | Update page properties |
+| `archivePage()` | PATCH | `/pages/{id}` | Soft delete (archive) |
+| `restorePage()` | PATCH | `/pages/{id}` | Restore archived page |
+| `getBlockChildren()` | GET | `/blocks/{id}/children` | Get page blocks (paginated) |
+| `appendBlocks()` | PATCH | `/blocks/{id}/children` | Append blocks to page |
+| `updateBlock()` | PATCH | `/blocks/{id}` | Update a block |
+| `deleteBlock()` | DELETE | `/blocks/{id}` | Delete a block |
+| `getComments()` | GET | `/comments` | Get page comments |
+| `createComment()` | POST | `/comments` | Add comment to page |
+| `getDatabase()` | GET | `/databases/{id}` | Get database schema (cached 10 min) |
+| `createDatabase()` | POST | `/databases` | Create new database |
+| `updateDatabase()` | PATCH | `/databases/{id}` | Update database schema |
+| `searchNotion()` | POST | `/search` | Search pages/databases |
+| `batchUpdatePages()` | — | — | Sequential updates with progress callback |
+| `appendImageBlock()` | — | — | Append external image to page |
+| `appendEmbedBlock()` | — | — | Append bookmark/embed to page |
+| `createSubPage()` | — | — | Create child page under parent |
+| `extractFormulaValue()` | — | — | Read formula property |
+| `extractRollupValue()` | — | — | Read rollup property |
+
+**Key references:** `src/notion/notion-api-core.ts:1-728`
+
+---
+
+### 3.7 `src/notion/notion-org-service.ts` — Organization Data Service
+
+High-level service for reading and writing SGA organization data in Notion. Uses `notion-api-core` for all API calls.
+
+#### Division Alias System
+- 12 divisions with 100+ total aliases
+- `resolveDivisionAlias()` — resolves aliases to full division names using word-boundary matching for short aliases (<=3 chars)
+- `detectDivisionFromMessage()` — extracts division from free-form message text, prioritizing longer/more specific aliases and requiring division-related context words
+
+**Divisions:**
+- Research and Technology (ristek, tech, IT, dev, ...)
+- Media and Information (media, minfo, medinfo, ...)
+- Public and Community Relations (PCR, pubcom, PR, humas, ...)
+- Business And Partnership (BNP, bisnis, sponsor, ...)
+- Intellectual & Career Development (ICD, karir, ...)
+- Student Advocacy and Welfare (advo, SAW, ...)
+- UKM Development (ukm, ...)
+- Treasurer (keuangan, finance, ...)
+- Controller (controker, audit, ...)
+- Secretary (sec, sekretaris, ...)
+- Executive (eksekutif, ...)
+- BPH (board, ...)
+
+#### Member Nickname System
+- 120+ nickname-to-full-name mappings
+- `resolveNickname()` — three-tier resolution:
+  1. Exact nickname lookup (O(1))
+  2. Partial match (prefix/suffix)
+  3. Fuzzy match via Levenshtein distance (max 2-3 edits depending on input length)
+
+#### Backlog Operations
+- `listBacklog()` — list all items with optional filter/sorts (2-min cache)
+- `searchBacklog()` — search by name (partial match)
+- `getBacklogByStatus()` — filter by status
+- `getBacklogByProject()` — filter by project relation
+- `getBacklogByMember()` — filter by PIC relation
+- `getBacklogByMemberName()` — multi-strategy member resolution (exact → contains → filtered match)
+- `updateBacklogStatus()` / `updateBacklogPriority()` — update single item
+- `deleteBacklogItem()` / `restoreBacklogItem()` — archive/restore
+- `bulkUpdateBacklogStatus()` — batch status update with progress callback
+- `getBacklogByDivision()` — formatted summary by division (resolves aliases)
+- `getBacklogByStatusSummary()` — formatted summary by status
+- `getBacklogStats()` — statistics by status, priority, and division
+
+#### Project Operations
+- `listProjects()` — all projects with caching (5-min TTL)
+- `searchProject()` — search by name
+- `getProjectDetails()` — project info with related backlog items
+
+#### Division/Member/Relation Operations
+- `listDivisions()` / `listMembers()` — cached lists (10-min TTL)
+- `getMembersByDivision()` — members filtered by division (alias-aware)
+- `addRelation()` / `removeRelation()` — manage page relation properties
+- `assignPicToBacklog()` / `removePicFromBacklog()` — PIC relation management
+- `refreshAllCaches()` — invalidate all cache prefixes
+
+**Key references:** `src/notion/notion-org-service.ts:1-1320`
+
+---
+
+### 3.8 `src/notion/ticket-service.ts` — Ticket CRUD
+
+Direct Notion API calls for ticket-specific operations. Wraps `notion-api-core` functions with ticket-specific logic.
+
+**Key functions:**
+- `createTicketDirect()` — creates a Master Backlog page with properties (Name, Status, Priority Level, Active, PIC relations, Division relations, Project relations, Reviewed By relations, Due Date) and professional description content block
+- `searchPagesDirect()` — Notion search API wrapper
+- `getTicketDetail()` — full page detail with blocks and comments
+- `addTicketNote()` — append timestamped note blocks
+- `addTicketComment()` — create Notion comment
+- `archiveTicketDirect()` / `restoreTicketDirect()` — archive/restore wrappers
+
+**Status mapping:** Normalizes various status inputs (e.g., "completed" → "Done", "need review" → "Need to review")
+
+**Key references:** `src/notion/ticket-service.ts:1-375`
+
+---
+
+### 3.9 `src/mcp/notion-client.ts` — MCP Client
+
+Optional Model Context Protocol client for Notion. Uses stdio transport to spawn the Notion MCP Server as a child process.
+
+**Behavior:**
+- **Lazy initialization** — only connects when `callNotionMCP()` or `listMCPTools()` is called
+- **Fallback** — if MCP connection fails, logs a warning and returns `null`; callers fall back to direct API via `notion-api-core`
+- **Graceful shutdown** — `closeMcpClient()` called during app shutdown
+
+**Current status:** MCP is retained for compatibility but all internal operations use the direct API for consistency, retry, rate limiting, and caching.
+
+**Key references:** `src/mcp/notion-client.ts:1-106`
+
+---
+
+### 3.10 `src/services/session-manager.ts` — Session Management
+
+In-memory per-user conversation context with TTL-based expiration.
+
+**Session data stored per phone number:**
+- User identity (name, phone)
+- Last intent, topic, ticket ID/name, project, division, member name
+- Recent conversation history (last 10 turns)
+- Active entities from last response (ticket IDs/names, project, member)
+- Last Notion results (up to 20 items for follow-up questions)
+- Metadata (creation time, last activity, message count)
+
+**Configuration:**
+- Session TTL: 30 minutes
+- Max history: 10 conversation turns
+- Max Notion results: 20 items
+- Cleanup interval: every 5 minutes
+
+**Follow-up detection (`detectFollowUp()`):**
+Returns a `FollowUpType` or null:
+- `reference_previous` — "yang tadi", "itu", "barusan"
+- `question_detail` — "deadline kapan", "siapa pic", "statusnya", "linknya"
+- `confirmation` — "ya", "tidak", "ok", "gas"
+- `continuation` — "terus gimana", "lalu"
+- `update_request` — "ubah statusnya", "ganti pic"
+
+**Key references:** `src/services/session-manager.ts:1-368`
+
+---
+
+### 3.11 `src/services/contact-lookup.ts` — Contact Lookup
+
+Phone number normalization and name lookup against a static `contacts.json` file.
+
+**Phone normalization:** Strips `+`, spaces, dashes, parentheses; converts leading `0` to `62`.
+
+**Lookup functions:**
+- `findNameByPhone()` — exact match after normalization (for inbound caller ID)
+- `findPhoneByName()` — exact then partial match against name and nickname (for outbound PIC notification)
+- `getDisplayName()` — returns full name or formatted phone number
+- `getFullName()` — returns full name or null
+- `findContactByPushName()` — matches WhatsApp push name against nicknames, full names, and first names
+- `resolveDisplayName()` — priority: phone lookup > push name lookup > raw push name
+
+**Key references:** `src/services/contact-lookup.ts:1-209`
+
+---
+
+### 3.12 `src/services/notification.ts` — Outbound Notifications
+
+WhatsApp notification service for PIC assignment alerts.
+
+**`notifyPIC()`:**
+1. Look up PIC phone number by name via `contact-lookup`
+2. Build notification message via `message-template`
+3. Send via `sendDirectMessage()`
+4. On failure: retry once
+
+**Key references:** `src/services/notification.ts:1-124`
+
+---
+
+### 3.13 `src/wa/sender.ts` — WhatsApp Message Sender
+
+Sends messages via Evolution API with LID resolution, message chunking, and media download support.
+
+#### LID Resolution
+WhatsApp privacy feature replaces phone numbers with `@lid` JIDs. The sender resolves these to real phone numbers using a multi-strategy approach:
+
+1. **Cache check** — in-memory + disk-persisted cache (`/app/cache/lid-cache.json`)
+2. **Profile picture match** — compare LID contact's profile pic with all `@s.whatsapp.net` contacts
+3. **Push name match** — match by WhatsApp display name
+4. **Direct number check** — if LID number starts with country code, verify via `checkNumberStatus`
+5. **Brute-force profile pic** — fetch profile pics for all WA contacts and compare
+
+#### Message Chunking
+Messages exceeding 3800 characters are split at newline boundaries. Subsequent chunks are prefixed with `(lanjutan N/M)`.
+
+#### Other Functions
+- `sendWhatsAppMessage()` — main send function with number normalization
+- `replyToGroup()` / `sendDirectMessage()` — convenience wrappers
+- `checkNumberStatus()` — verify if number is registered on WhatsApp
+- `fetchBotJid()` — get bot's own JID from Evolution API (cached)
+- `downloadMedia()` — download media from WhatsApp message
+
+**Key references:** `src/wa/sender.ts:1-489`
+
+---
+
+### 3.14 `src/webhook/handler.ts` — Webhook Processing Pipeline
+
+Receives Evolution API webhooks and routes messages through the processing pipeline.
+
+#### Routes
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| POST | `/webhook/:instanceName` | Main webhook receiver |
+| POST | `/webhook/:instanceName/*` | Wildcard for v2.x event-based webhooks |
+| GET | `/health` | Health check |
+| GET | `/ai-stats` | AI call statistics and recent logs |
+| GET | `/` | Server info |
+| POST | `/notion/webhook` | Notion webhook receiver (cache invalidation) |
+| GET | `/notion/webhook` | Notion webhook verification |
+
+#### Processing Pipeline (per message)
+
+1. **Instance validation** — reject if instance name doesn't match config
+2. **Event filter** — only process `messages.upsert` events
+3. **From-me filter** — ignore messages sent by the bot itself
+4. **Deduplication** — Map of processed message IDs, cleaned every 60 seconds
+5. **Empty message filter** — skip messages with no text and no image
+6. **Image attachment** — if image with caption, try to attach to matching ticket (async)
+7. **Group/DM classification** — check `remoteJid` for `@g.us`
+8. **Rate limiting** — max 20 messages per minute per user JID
+9. **Mention detection** — for groups, check `contextInfo.mentionedJid` against bot JID
+10. **Mention stripping** — remove `@<botNumber>` from message text
+11. **Reply target resolution** — normalize JID to phone number or group JID
+12. **Phone extraction** — extract sender phone for contact lookup
+13. **Display name resolution** — contact DB lookup > push name
+14. **Async processing** — `setImmediate()` to avoid blocking the webhook response
+15. **Response routing** — group replies via `replyToGroup()`, DMs via `sendDirectMessage()`
+
+**Key references:** `src/webhook/handler.ts:1-575`
+
+---
+
+### 3.15 `src/utils/helpers.ts` — Utility Functions
+
+- `generateTicketId()` — generates `TK-YYYYMMDD-XXX` format IDs
+- `normalizeDepartment()` — maps department aliases to canonical names
+- `extractJSON()` — safely extracts JSON from text that may contain extra content
+- `extractNotionUrl()` — extracts Notion page URL from text
+- `truncate()` — string truncation with ellipsis
+- `sleep()` — promise-based delay
+- `formatDate()` — date to YYYY-MM-DD
+
+**Key references:** `src/utils/helpers.ts:1-79`
+
+---
+
+### 3.16 `src/utils/message-template.ts` — Message Templates
+
+- `buildGreeting()` — personalized greeting based on contact recognition
+- `buildPICNotificationMessage()` — formatted notification for PIC assignment
+- `buildSenderConfirmation()` — confirmation that PIC was notified
+- `buildPICNotFoundWarning()` — warning when PIC phone number not found
+
+**Key references:** `src/utils/message-template.ts:1-71`
+
+---
+
+## 4. Data Flow
+
+### 4.1 Incoming Message Flow
+
+```
+WhatsApp User
+    │
+    ▼
+Evolution API (WhatsApp bridge)
+    │
+    ▼ POST /webhook/:instanceName
+Fastify Server (src/webhook/handler.ts)
+    │
+    ├─ Validate instance name
+    ├─ Filter: only messages.upsert, not from-me
+    ├─ Deduplicate by message ID
+    ├─ Rate limit check (20/min/user)
+    │
+    ├─ [Group] Check bot mention → ignore if not mentioned
+    ├─ Strip @mention from text
+    ├─ Resolve sender phone & display name
+    │
+    ▼ setImmediate() — async processing
+handleMessage() (src/ai/agent.ts)
+    │
+    ├─ Load/create session (session-manager)
+    ├─ parseCommand() — regex match
+    │   ├─ Match → handleCommand() → Notion API → response
+    │   └─ No match → continue
+    │
+    ▼ handleSmartMessage()
+    │
+    ├─ Follow-up detection (session context)
+    ├─ Greeting detection
+    ├─ Pending ticket state check
+    ├─ Broadcast intent detection
+    ├─ Member name extraction
+    ├─ Self-reference detection
+    ├─ Stats/Project/List/Help/Division/Member intent
+    ├─ Creation intent → AI extraction → handleCreateTicket()
+    ├─ Query keyword detection → handleQuery()
+    ├─ AI extraction (Claude) → classify as ticket/query/chat
+    │
+    ▼
+Response text
+    │
+    ▼
+sendWhatsAppMessage() (src/wa/sender.ts)
+    │
+    ├─ Normalize number (LID resolution if needed)
+    ├─ Split into chunks if >3800 chars
+    │
+    ▼
+Evolution API → WhatsApp User
 ```
 
-```typescript
-// src/webhook/routes.ts
-import { FastifyInstance } from 'fastify';
-import { verifyTwilioSignature } from './verify';
-import { messageQueue } from '../queue';
+### 4.2 Ticket Creation Flow
 
-export async function webhookRoutes(app: FastifyInstance) {
-  // WhatsApp verification
-  app.get('/webhook/whatsapp', async (req, reply) => {
-    reply.send({ status: 'alive', timestamp: new Date().toISOString() });
-  });
-
-  // Incoming messages
-  app.post('/webhook/whatsapp', {
-    preHandler: [verifyTwilioSignature],
-  }, async (req, reply) => {
-    const { From, Body, ProfileName, MessageSid } = req.body as any;
-
-    // Push to queue for async processing
-    await messageQueue.add('process-message', {
-      phoneNumber: From,
-      message: Body,
-      profileName: ProfileName,
-      messageSid: MessageSid,
-      receivedAt: new Date().toISOString(),
-    }, {
-      attempts: 3,
-      backoff: { type: 'exponential', delay: 1000 },
-    });
-
-    // Immediate 200 OK
-    reply.type('text/xml').send('<Response></Response>');
-  });
-}
+```
+User: "buat tiket fix navbar untuk ristek, assign ke iqbal, deadline 15 mei"
+    │
+    ▼ handleSmartMessage()
+    │
+    ├─ Creation intent detected → AI extraction
+    │   ▼ createMessage(EXTRACTION_PROMPT + message)
+    │   Returns: { is_ticket: true, judul: "Fix Navbar", 
+    │              departemen: "Research and Technology", 
+    │              pics: ["Iqbal Azhari Pasaribu"], ... }
+    │
+    ▼ handleCreateTicket()
+    │
+    ├─ resolveDivisionPageId("ristek") → alias → Notion page ID
+    ├─ resolveProjectPageId() → null (not specified)
+    ├─ resolveMemberPageId("iqbal") → nickname → Notion page ID
+    │
+    ├─ [If PIC unresolved] → save pending state → ask user
+    │
+    ▼ createTicketDirect()
+    │
+    ├─ Create Notion page with properties + description block
+    │
+    ├─ notifyPIC() → async WA notification to PIC
+    │
+    ▼ Return confirmation with Notion URL
 ```
 
-### 3.3 AI Layer
+### 4.3 Cache Architecture
 
-```typescript
-// src/ai/classifier.ts
-import Anthropic from '@anthropic-ai/sdk';
-import { config } from '../config';
-import { SYSTEM_PROMPT } from './prompts/system';
-import { ClassificationResult } from './types';
-
-const client = new Anthropic({ apiKey: config.ANTHROPIC_API_KEY });
-
-export async function classifyIntent(message: string): Promise<ClassificationResult> {
-  const response = await client.messages.create({
-    model: config.AI_MODEL,
-    max_tokens: config.AI_MAX_TOKENS,
-    system: SYSTEM_PROMPT,
-    messages: [{ role: 'user', content: message }],
-  });
-
-  const text = response.content[0].type === 'text' ? response.content[0].text : '';
-  const jsonMatch = text.match(/\{[\s\S]*\}/);
-
-  if (!jsonMatch) {
-    return { intent: 'unknown', confidence: 0, entities: {}, needsClarification: true };
-  }
-
-  const parsed = JSON.parse(jsonMatch[0]);
-
-  return {
-    intent: parsed.intent || 'unknown',
-    confidence: parsed.confidence || 0,
-    entities: parsed.entities || {},
-    suggestedMCP: parsed.suggested_mcp,
-    needsClarification: parsed.clarification_needed || false,
-    clarificationQuestion: parsed.clarification_question,
-  };
-}
+```
+Notion API Response
+    │
+    ▼ notion-api-core.ts
+    │
+    ├─ getCached(key, fetcher, ttl)
+    │   ├─ Cache hit → return cached data
+    │   └─ Cache miss → fetch → store → return
+    │
+    ├─ Cache keys:
+    │   ├─ "backlog:list:{filter}:{sorts}" (2 min TTL)
+    │   ├─ "projects:list" (5 min TTL)
+    │   ├─ "divisions:list" (10 min TTL)
+    │   ├─ "members:list" (10 min TTL)
+    │   ├─ "relation:{pageId}" (10 min TTL)
+    │   ├─ "page:detail:{pageId}" (1 min TTL)
+    │   └─ "db-schema:{id}" (10 min TTL)
+    │
+    ├─ Invalidation triggers:
+    │   ├─ createPage() → invalidate "backlog", "projects"
+    │   ├─ updatePage() → invalidate "backlog", "page:{id}"
+    │   ├─ archivePage() → invalidate "backlog", "page:{id}"
+    │   ├─ appendBlocks() → invalidate "blocks:{id}"
+    │   ├─ Notion webhook → invalidate "page:detail:{id}", "backlog"
+    │   └─ !refresh command → refreshAllCaches()
 ```
 
-```typescript
-// src/ai/prompts/system.ts
-export const SYSTEM_PROMPT = `Kamu adalah asisten AI untuk layanan kampus via WhatsApp.
+---
 
-TUGAS: Analisis pesan user dan tentukan intent, entities, dan MCP yang tepat.
+## 5. Error Handling
 
-AVAILABLE INTENTS:
-- info_akademik: Query data akademik (nilai, jadwal, KRS, KHS, profil mahasiswa)
-- buat_ticket: Buat ticket/laporan masalah (IT, fasilitas, akademik)
-- cek_status: Cek status ticket/request yang sudah dibuat
-- help: User butuh bantuan atau info tentang layanan
-- greeting: Sapaan, terima kasih, perpisahan
-- unknown: Tidak dapat ditentukan
+### 5.1 Notion API Errors
 
-RESPONSE FORMAT (JSON strictly):
+Handled in `notion-api-core.ts:notionRequest()`:
+
+| Error Type | Behavior |
+|-----------|----------|
+| HTTP 429 (Rate Limited) | Retry with `Retry-After` header delay, up to 3 attempts |
+| HTTP 5xx (Server Error) | Retry with exponential backoff (1s, 3s, 6s) |
+| HTTP 4xx (Client Error) | Throw immediately — no retry |
+| Network Error | Retry with exponential backoff |
+| All retries exhausted | Throw last error to caller |
+
+### 5.2 AI API Errors
+
+Handled in `anthropic-client.ts:createMessage()`:
+
+| Error Type | Behavior |
+|-----------|----------|
+| HTTP 429 (Rate Limited) | Retry with exponential backoff (2s, 5s, 10s) |
+| HTTP 5xx (Server Error) | Retry with exponential backoff |
+| HTTP 4xx (Client Error) | Throw immediately |
+| All retries exhausted | Throw last error |
+
+**Fallback chain in `agent.ts`:**
+- AI extraction failure → fall through to `handleChat()`
+- `handleChat()` failure → return generic error message
+- Command handler failure → return user-friendly error with `!help` suggestion
+- `addCasualTouch()` failure → use simple prefix fallback
+
+### 5.3 WhatsApp Errors
+
+- Send failure in `notifyPIC()` → retry once, then log and return false
+- LID resolution failure → use raw LID JID (will fail to send, logged as warning)
+- Message chunking → automatic split at newline boundaries
+
+### 5.4 Session Errors
+
+- Session not found → create new session
+- Cache entry expired → fetch fresh data
+
+---
+
+## 6. Logging
+
+### 6.1 Application Logging
+
+All modules use `console.log`, `console.warn`, and `console.error` with consistent prefixes:
+
+| Prefix | Module |
+|--------|--------|
+| `[Bot]` | index.ts (startup/shutdown) |
+| `[Webhook]` | webhook/handler.ts |
+| `[Agent]` | ai/agent.ts |
+| `[AI-Call]` | ai/anthropic-client.ts |
+| `[AI-Log]` | ai/anthropic-client.ts (CSV logging) |
+| `[Notion Core]` | notion/notion-api-core.ts |
+| `[Notion]` | notion/notion-org-service.ts |
+| `[MCP]` | mcp/notion-client.ts |
+| `[WA Sender]` | wa/sender.ts |
+| `[Notification]` | services/notification.ts |
+
+### 6.2 AI Call Logging
+
+Every AI API call is logged to `logs/ai-calls.csv`:
+
+```csv
+timestamp,model,input_tokens,output_tokens,inference_ms,caller
+2026-05-15T10:30:00.000Z,claude-sonnet-4-20250514,1250,380,3200,handleSmartMessage
+```
+
+Accessible via `GET /ai-stats` endpoint, which returns cumulative statistics and the last 50 log entries.
+
+### 6.3 Fastify Request Logging
+
+Fastify's built-in logger is configured based on `NODE_ENV`:
+- Development: `debug` level
+- Production: `info` level
+
+---
+
+## 7. Configuration
+
+### 7.1 Environment Variables
+
+All configuration is via environment variables, validated at startup by Zod. See Section 3.2 for the complete schema.
+
+### 7.2 Contacts Database
+
+Static JSON file at `src/config/contacts.json` containing an array of contact objects:
+
+```json
 {
-  "intent": "string",
-  "confidence": 0.0-1.0,
-  "entities": {
-    "action": "string",
-    "ticket_id": "string|null",
-    "semester": "string|null",
-    "category": "string|null",
-    "description": "string|null"
-  },
-  "suggested_mcp": "string",
-  "clarification_needed": boolean,
-  "clarification_question": "string|null"
-}
-
-RULES:
-- Jika confidence < 0.7, set clarification_needed = true
-- Selalu extract entities sebanyak mungkin
-- suggested_mcp: mcp_akademik, mcp_it_support, atau null
-- Response HARUS valid JSON`;
-```
-
-### 3.4 Orchestrator (Controller)
-
-```typescript
-// src/controller/orchestrator.ts
-import { classifyIntent } from '../ai/classifier';
-import { mcpRouter } from './router';
-import { responseBuilder } from './response-builder';
-import { sessionManager } from './session-manager';
-import { whatsappService } from '../services/whatsapp';
-import { config } from '../config';
-import { logger } from '../utils/logger';
-
-interface IncomingMessage {
-  phoneNumber: string;
-  message: string;
-  profileName: string;
-  messageSid: string;
-  receivedAt: string;
-}
-
-export async function processMessage(msg: IncomingMessage) {
-  const startTime = Date.now();
-  const traceId = `trace-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-
-  try {
-    logger.info({ traceId, event: 'message_received', from: msg.phoneNumber, text: msg.message });
-
-    // 1. Load or create session
-    const session = await sessionManager.getOrCreate(msg.phoneNumber);
-    logger.info({ traceId, event: 'session_loaded', sessionId: session.id });
-
-    // 2. Classify intent with AI
-    const classification = await classifyIntent(msg.message);
-    logger.info({ traceId, event: 'classified', intent: classification.intent, confidence: classification.confidence });
-
-    // 3. Check if clarification needed
-    if (classification.needsClarification || classification.confidence < config.AI_CONFIDENCE_THRESHOLD) {
-      const reply = classification.clarificationQuestion ||
-        'Maaf, saya kurang mengerti. Ketik "help" untuk melihat layanan yang tersedia.';
-      await whatsappService.sendReply(msg.phoneNumber, reply);
-      return;
-    }
-
-    // 4. Route to MCP
-    const mcpResponse = await mcpRouter.route(classification, session);
-    logger.info({ traceId, event: 'mcp_response', success: mcpResponse.success, mcp: classification.suggestedMCP });
-
-    // 5. Build and send response
-    const replyText = responseBuilder.build(mcpResponse, classification);
-    await whatsappService.sendReply(msg.phoneNumber, replyText);
-
-    // 6. Update session
-    await sessionManager.update(session.id, {
-      lastIntent: classification.intent,
-      lastMessageAt: new Date(),
-      context: { ...session.context, lastEntities: classification.entities },
-    });
-
-    logger.info({
-      traceId,
-      event: 'completed',
-      totalTimeMs: Date.now() - startTime,
-      intent: classification.intent,
-    });
-
-  } catch (error) {
-    logger.error({ traceId, event: 'error', error: (error as Error).message });
-
-    // Fallback: send error message
-    try {
-      await whatsappService.sendReply(
-        msg.phoneNumber,
-        'Maaf, sedang ada gangguan teknis. Tim kami sedang menanganinya. Silakan coba lagi dalam beberapa menit.'
-      );
-    } catch (sendError) {
-      logger.error({ traceId, event: 'fallback_send_failed', error: (sendError as Error).message });
-    }
-  }
+  "name": "Full Name",
+  "phone": "6281234567890",
+  "nickname": "nickname",
+  "division": "Division Name",
+  "role": "Role"
 }
 ```
 
-### 3.5 MCP Core Framework
+### 7.3 Notion Workspace Structure
 
-```typescript
-// src/mcp/core/interface.ts
-export interface MCPRequest {
-  id: string;
-  action: string;
-  params: Record<string, any>;
-  context: {
-    userId: string;
-    phoneNumber: string;
-    sessionId: string;
-    role: string;
-  };
-  timestamp: string;
-}
+The bot expects the following Notion databases:
 
-export interface MCPResponse {
-  id: string;
-  success: boolean;
-  data?: any;
-  error?: {
-    code: string;
-    message: string;
-    details?: any;
-    retryable: boolean;
-  };
-  metadata: {
-    mcpName: string;
-    action: string;
-    executionTimeMs: number;
-    cacheHit: boolean;
-    sourceSystem: string;
-  };
-}
+| Database | Config Var | Purpose |
+|----------|-----------|---------|
+| Master Backlog | `NOTION_DATABASE_ID` | Ticket/backlog items |
+| Master Projects | `NOTION_MASTER_PROJECTS_ID` | Project registry |
+| Divisions | `NOTION_DIVISIONS_ID` | Division registry |
+| Members | `NOTION_MEMBERS_ID` | Member registry |
 
-export interface MCPModule {
-  name: string;
-  version: string;
-  initialize(): Promise<void>;
-  execute(request: MCPRequest): Promise<MCPResponse>;
-  healthCheck(): Promise<{ status: string; uptime: number }>;
-  shutdown(): Promise<void>;
-}
-```
-
-```typescript
-// src/mcp/core/client.ts
-import { MCPRequest, MCPResponse } from './interface';
-import { config } from '../../config';
-import { logger } from '../../utils/logger';
-
-export class MCPClient {
-  private endpoints: Map<string, string> = new Map();
-
-  constructor() {
-    this.endpoints.set('mcp_akademik', config.MCP_AKADEMIK_URL);
-    // Add more MCPs as needed
-  }
-
-  registerEndpoint(mcpName: string, url: string) {
-    this.endpoints.set(mcpName, url);
-  }
-
-  async execute(mcpName: string, request: MCPRequest): Promise<MCPResponse> {
-    const url = this.endpoints.get(mcpName);
-    if (!url) {
-      return {
-        id: request.id,
-        success: false,
-        error: { code: 'MCP_NOT_FOUND', message: `MCP "${mcpName}" not registered`, retryable: false },
-        metadata: { mcpName, action: request.action, executionTimeMs: 0, cacheHit: false, sourceSystem: 'none' },
-      };
-    }
-
-    const startTime = Date.now();
-    try {
-      const response = await fetch(`${url}/execute`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(request),
-        signal: AbortSignal.timeout(config.REQUEST_TIMEOUT_MS),
-      });
-
-      const data = await response.json();
-      return data as MCPResponse;
-    } catch (error) {
-      logger.error({ event: 'mcp_call_failed', mcpName, error: (error as Error).message });
-      return {
-        id: request.id,
-        success: false,
-        error: {
-          code: 'MCP_UNAVAILABLE',
-          message: `MCP "${mcpName}" is unavailable`,
-          retryable: true,
-        },
-        metadata: { mcpName, action: request.action, executionTimeMs: Date.now() - startTime, cacheHit: false, sourceSystem: 'none' },
-      };
-    }
-  }
-}
-```
-
-### 3.6 MCP Router
-
-```typescript
-// src/controller/router.ts
-import { MCPClient } from '../mcp/core/client';
-import { ClassificationResult } from '../ai/types';
-import { Session } from '../db/schema';
-import { v4 as uuid } from 'uuid';
-
-const mcpClient = new MCPClient();
-
-const INTENT_MCP_MAP: Record<string, string> = {
-  info_akademik: 'mcp_akademik',
-  buat_ticket: 'mcp_it_support',
-  cek_status: 'mcp_it_support',
-};
-
-export async function route(classification: ClassificationResult, session: Session) {
-  const mcpName = classification.suggestedMCP || INTENT_MCP_MAP[classification.intent];
-
-  if (!mcpName) {
-    return {
-      id: uuid(),
-      success: false,
-      error: { code: 'NO_MCP', message: 'No MCP available for this intent', retryable: false },
-      metadata: { mcpName: 'none', action: 'none', executionTimeMs: 0, cacheHit: false, sourceSystem: 'none' },
-    };
-  }
-
-  const action = mapIntentToAction(classification.intent, classification.entities);
-
-  return mcpClient.execute(mcpName, {
-    id: uuid(),
-    action,
-    params: classification.entities,
-    context: {
-      userId: session.userId,
-      phoneNumber: session.phoneNumber,
-      sessionId: session.id,
-      role: session.role,
-    },
-    timestamp: new Date().toISOString(),
-  });
-}
-
-function mapIntentToAction(intent: string, entities: Record<string, any>): string {
-  switch (intent) {
-    case 'info_akademik':
-      if (entities.action?.includes('nilai')) return 'get_grades';
-      if (entities.action?.includes('jadwal')) return 'get_schedule';
-      if (entities.action?.includes('krs')) return 'get_krs';
-      return 'get_profile';
-    case 'buat_ticket':
-      return 'create_ticket';
-    case 'cek_status':
-      return 'check_ticket';
-    default:
-      return 'unknown';
-  }
-}
-```
-
-## 4. Docker Setup
-
-```yaml
-# docker/docker-compose.yml
-version: '3.8'
-
-services:
-  webhook:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile
-    ports:
-      - "3000:3000"
-    env_file: ../.env
-    depends_on:
-      - redis
-      - postgres
-    restart: unless-stopped
-
-  worker:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile
-    command: node dist/queue/processor.js
-    env_file: ../.env
-    depends_on:
-      - redis
-      - postgres
-    restart: unless-stopped
-
-  mcp-akademik:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile.mcp
-      args:
-        MCP_NAME: akademik
-    ports:
-      - "3001:3001"
-    env_file: ../.env
-    restart: unless-stopped
-
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis-data:/data
-
-  postgres:
-    image: postgres:16-alpine
-    ports:
-      - "5432:5432"
-    environment:
-      POSTGRES_DB: wsg
-      POSTGRES_USER: wsg
-      POSTGRES_PASSWORD: wsg_dev
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-
-volumes:
-  redis-data:
-  postgres-data:
-```
-
-```dockerfile
-# docker/Dockerfile
-FROM node:20-alpine AS builder
-WORKDIR /app
-COPY package*.json ./
-RUN npm ci
-COPY . .
-RUN npm run build
-
-FROM node:20-alpine
-WORKDIR /app
-COPY --from=builder /app/dist ./dist
-COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/package.json ./
-EXPOSE 3000
-CMD ["node", "dist/index.js"]
-```
-
-## 5. Configuration Management
-
-```bash
-# .env.example
-# Server
-PORT=3000
-NODE_ENV=development
-
-# Twilio / WhatsApp
-TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxx
-TWILIO_AUTH_TOKEN=xxxxxxxxxxxxx
-TWILIO_PHONE_NUMBER=+14155238886
-
-# AI (Anthropic)
-ANTHROPIC_API_KEY=sk-ant-xxxxxxxxxxxxx
-AI_MODEL=claude-haiku-4-5-20251001
-AI_MAX_TOKENS=500
-AI_CONFIDENCE_THRESHOLD=0.7
-
-# Database
-DATABASE_URL=postgresql://wsg:wsg_dev@localhost:5432/wsg
-
-# Redis
-REDIS_URL=redis://localhost:6379
-
-# MCP Endpoints
-MCP_AKADEMIK_URL=http://localhost:3001
-MCP_IT_SUPPORT_URL=http://localhost:3002
-
-# Limits
-RATE_LIMIT_PER_MINUTE=30
-REQUEST_TIMEOUT_MS=10000
-```
-
-## 6. Setup Script
-
-```bash
-#!/bin/bash
-# scripts/setup.sh
-set -e
-
-echo "=== WhatsApp Service Gateway Setup ==="
-
-# Check prerequisites
-echo "Checking prerequisites..."
-command -v node >/dev/null 2>&1 || { echo "Node.js required"; exit 1; }
-command -v docker >/dev/null 2>&1 || { echo "Docker required"; exit 1; }
-
-# Copy env file
-if [ ! -f .env ]; then
-  cp .env.example .env
-  echo "Created .env file — please fill in your API keys"
-fi
-
-# Install dependencies
-echo "Installing dependencies..."
-npm install
-
-# Start infrastructure
-echo "Starting Redis and PostgreSQL..."
-docker compose -f docker/docker-compose.yml up -d redis postgres
-
-# Wait for services
-sleep 3
-
-# Run migrations
-echo "Running database migrations..."
-npm run db:migrate
-
-# Build
-echo "Building project..."
-npm run build
-
-echo ""
-echo "=== Setup Complete ==="
-echo "1. Edit .env with your API keys"
-echo "2. Run 'npm run dev' to start development"
-echo "3. Run 'npm run test:poc' to validate POC"
-echo ""
+**Master Backlog properties:**
+- `Name` (title) — ticket title
+- `Status` (status) — Not started, In progress, Need to review, Need to fix, Done, Blocking
+- `Priority Level` (select) — High, Medium, Low
+- `Active` (checkbox) — active flag
+- `PIC` (relation → Members) — assigned persons
+- `🧏‍♀️ Divisions` (relation → Divisions) — associated divisions
+- `📕 Projects` (relation → Projects) — associated projects
+- `Reviewed By` (relation → Members) — reviewers
+- `Due Date` (date) — deadline

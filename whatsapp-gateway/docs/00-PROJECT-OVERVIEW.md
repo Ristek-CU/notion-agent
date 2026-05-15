@@ -1,179 +1,174 @@
-# One-Stop Service Gateway via WhatsApp + MCP
+# Oro Bot — WhatsApp + Notion AI Assistant for SGA Cakrawala Universe
 
 ## Project Identity
 
 | Field | Detail |
 |-------|--------|
-| **Project Name** | WhatsApp Service Gateway (WSG) |
-| **Tagline** | Satu Chat, Semua Layanan |
-| **Version** | 0.1.0 (Concept Phase) |
-| **Status** | Prototyping / POC |
+| **Project Name** | Oro Bot (WA Notion Bot) |
+| **Tagline** | Asisten AI Pengelola Tiket & Backlog SGA via WhatsApp |
+| **Version** | 2.0.0 (Production) |
+| **Status** | Live / Active Development |
 | **Date Created** | 2026-04-22 |
+| **Last Updated** | 2026-05-15 |
 
 ---
 
 ## 1. Vision
 
-Menjadi platform layanan digital terdepan yang menyatukan akses ke seluruh sistem layanan melalui satu pintu komunikasi — WhatsApp — dengan kecerdasan buatan sebagai penghubung utama.
+Menjadi asisten AI utama untuk pengelolaan tiket, backlog, project, dan tugas di organisasi SGA Cakrawala Universe melalui WhatsApp — satu chat untuk mengelola seluruh operasional organisasi.
 
 ## 2. Problem Statement
 
 ### Pain Points
-1. **Sistem tersebar** — Mahasiswa dan staf harus mengakses 5-10 sistem berbeda untuk berbagai kebutuhan (akademik, admisi, inventori, IT support)
-2. **UX kompleks** — Setiap sistem punya UI/UX berbeda, login berbeda, alur berbeda
-3. **Response time lambat** — Proses manual request membutuhkan waktu berhari-hari
-4. **Tidak ada tracking** — User tidak bisa melacak status request secara real-time
-5. **Human-dependent** — Banyak proses yang membutuhkan interaksi manusia padahal bisa diotomasi
+1. **Manajemen tugas tersebar** — Tiket dan backlog tersebar di berbagai channel (chat, spreadsheet, meeting notes) tanpa tracking terpusat
+2. **Kesulitan tracking progress** — Anggota tidak bisa melihat progress project dan status tugas secara real-time
+3. **Komunikasi lambat** — Koordinasi antar divisi membutuhkan banyak back-and-forth di grup WhatsApp
+4. **Notifikasi manual** — PIC harus di-tag satu per satu saat ada tugas baru
+5. **Tidak ada visibility** — Ketua organisasi tidak bisa melihat overview statistik backlog dan project
 
-### Impact Saat Ini
-- Waktu rata-rata akses layanan: 2-5 hari kerja
-- Jumlah sistem yang harus diakses: 5-10 sistem
-- Tingkat kepuasan user: rendah (belum terukur)
-- Efisiensi staf: banyak waktu habis untuk proses manual
+### Impact
+- Waktu rata-rata assign tugas: manual via chat group
+- Tracking progress: harus buka Notion langsung
+- Koordinasi antar divisi: melalui meeting atau chat manual
+- Notifikasi: tidak ada otomasi
 
 ## 3. Solution Overview
 
-Platform WhatsApp Service Gateway (WSG) — layanan satu pintu berbasis chat yang menghubungkan user ke berbagai sistem backend melalui AI-powered intent processing dan modular MCP orchestration.
+**Oro Bot** — WhatsApp AI bot yang terintegrasi langsung dengan Notion workspace SGA Cakrawala Universe. Menggunakan AI (via z.ai proxy) untuk memahami bahasa natural dan mengelola tiket, backlog, project, divisi, dan anggota.
 
 ### Core Concept
 ```
-Conversational Interface + AI Decision Engine + MCP Orchestration Layer
+WhatsApp (Interface) + AI Agent (Oro) + Notion API (Data Layer)
 ```
 
 Komponen utama:
-- **WhatsApp** = Interface utama (channel komunikasi)
-- **AI (Claude)** = Memahami kebutuhan user, menentukan aksi
-- **MCP** = Menjalankan integrasi ke sistem backend secara modular
+- **WhatsApp via Evolution API** = Interface utama (DM dan Group dengan mention)
+- **AI Agent (Oro)** = Memahami kebutuhan user, membuat/membaca/mengupdate data
+- **Notion API** = Single source of truth untuk semua data organisasi
 
 ## 4. Architecture Summary
 
 ```
 +-------------------+
-|    WhatsApp User  |
-|   (Mahasiswa/     |
-|    Staf/Instansi) |
+|   WhatsApp User   |
+| (Anggota SGA /    |
+|  Pengurus)        |
 +--------+----------+
          |
+         | WhatsApp Protocol
          v
 +--------+----------+
-| WhatsApp Business |
-|   API (Twilio/    |
-|   Meta API)       |
+|  Evolution API    |
+|  (WhatsApp        |
+|   Gateway)        |
 +--------+----------+
          |
+         | HTTP POST (webhook)
          v
 +--------+----------+
-|   Webhook Server  |
-| (Entry Point for  |
-|  incoming msgs)   |
+|  Fastify Server   |
+|  (Entry Point)    |
+|  - Webhook handler|
+|  - Rate limiting  |
+|  - Deduplication  |
 +--------+----------+
          |
          v
 +--------+----------+     +-------------------+
-| Backend Controller|<--->|  AI Layer         |
-| (Orchestrator)    |     | (Claude SDK)      |
-+--------+----------+     | - Intent parsing  |
-         |                | - Entity extract  |
-         v                | - MCP routing     |
+|  AI Agent (Oro)   |<--->|  z.ai Proxy       |
+|  - Intent detect  |     |  (Anthropic API   |
+|  - Command parser |     |   compatible)     |
+|  - Smart routing  |     |  Backend: GLM     |
 +--------+----------+     +-------------------+
-|   MCP Registry    |
-| (Service Discovery|
-|  & Routing)       |
-+--------+----------+
          |
-    +----+----+--------+--------+
-    |         |        |        |
-    v         v        v        v
-+-------+ +------+ +--------+ +--------+
-| MCP   | | MCP  | | MCP    | | MCP    |
-| Akade | | Admi | | Inven  | | IT     |
-| mik   | | si   | | tory   | |Support |
-+---+---+ +--+---+ +--+-----+ +--+-----+
-    |        |        |          |
-    v        v        v          v
-  [Sistem Akademik] [Admisi] [Inventory] [Ticketing]
+         v
++--------+----------+
+|  Notion API       |
+|  - Master Backlog |
+|  - Master Projects|
+|  - Divisions      |
+|  - Members        |
+|  - Ticket Detail  |
++-------------------+
 ```
 
 ## 5. Technology Stack
 
 | Layer | Technology | Justification |
 |-------|-----------|---------------|
-| **Interface** | WhatsApp Business API / Twilio | Channel yang paling familiar di Indonesia |
-| **Webhook** | Node.js + Express / Fastify | Lightweight, fast, good async support |
-| **AI Layer** | Claude API via Anthropic SDK | Best-in-class intent understanding |
-| **Backend** | Node.js + TypeScript | Type safety, good ecosystem |
-| **MCP Framework** | Custom modular TypeScript | Flexible, decoupled architecture |
-| **Database** | PostgreSQL | Relational data, ACID compliance |
-| **Cache** | Redis | Session management, response caching |
-| **Queue** | BullMQ (Redis-based) | Job queue for async processing |
+| **Interface** | WhatsApp via Evolution API | Gratis, familiar, tidak perlu WhatsApp Business API |
+| **Server** | Node.js + Fastify | Lightweight, fast, good async support |
+| **Language** | TypeScript | Type safety, better DX |
+| **AI Layer** | Anthropic SDK via z.ai proxy (GLM backend) | Cost-effective AI, Anthropic-compatible API |
+| **AI Model** | claude-sonnet-4-20250514 | Good balance of speed and intelligence |
+| **Data Layer** | Notion API (direct) | SGA sudah pakai Notion, no additional DB needed |
+| **Cache** | In-memory (Map) + Notion-side caching | Simple, no Redis dependency for MVP |
+| **Session** | In-memory (Map) | Per-user conversation context, 30-min TTL |
+| **Validation** | Zod | Environment config validation |
 | **Deployment** | Docker + Docker Compose | Consistent environments |
 
 ## 6. Key Stakeholders
 
 | Stakeholder | Role | Interest |
 |------------|------|----------|
-| Mahasiswa | End User | Akses layanan mudah via WhatsApp |
-| Staf Akademik | End User | Tracking request, info internal |
-| Admin IT | Operator | Monitoring, konfigurasi sistem |
-| Pihak Instansi | Partner | Integrasi layanan instansi |
-| Tim Pengembang | Builder | Implementasi dan maintenance |
+| Anggota SGA | End User | Buat tiket, cek tugas, lihat backlog via WhatsApp |
+| Ketua/Co-Ketua SGA | Admin | Overview statistik, tracking progress seluruh divisi |
+| Head of Division | PIC | Assign tugas, tracking progress divisi |
+| Tim Ristek | Developer | Maintenance dan pengembangan bot |
 
 ## 7. Success Metrics
 
-### MVP Success Criteria
-| Metric | Target | Measurement |
-|--------|--------|-------------|
-| End-to-end flow working | Ya | 1 layanan end-to-end |
-| Response time | < 5 detik | From message to response |
-| Intent accuracy | > 85% | Correct MCP routing |
-| Uptime | > 95% | System availability |
-| Test coverage | > 70% | Unit + integration tests |
-
-### Long-term Metrics
-| Metric | Target |
-|--------|--------|
-| User adoption | 50% mahasiswa aktif dalam 6 bulan |
-| Request via chat | 80% dari total request |
-| Resolution time | < 1 jam untuk standard request |
-| Satisfaction score | > 4.0/5.0 |
+### Current Metrics
+| Metric | Target | Status |
+|--------|--------|--------|
+| End-to-end flow working | Ya | Achieved |
+| Response time | < 10 detik | Achieved |
+| Intent accuracy (AI extraction) | > 85% | Achieved |
+| Command coverage | 30+ commands | Achieved |
+| Uptime | > 95% | In Progress |
 
 ## 8. Project Phases
 
-### Phase 0: Proof of Concept (2 minggu)
-- Validasi koneksi WhatsApp API
-- Test Claude SDK integration
-- POC 1 message flow end-to-end
-- Validasi arsitektur MCP
-- **Goal**: Buktikan konsep bisa jalan
+### Phase 0: Proof of Concept (Completed)
+- Koneksi Evolution API + WhatsApp
+- AI extraction via z.ai proxy
+- Notion API direct integration
+- Basic ticket creation flow
 
-### Phase 1: MVP — Internal Kampus (6-8 minggu)
+### Phase 1: Core Features (Completed)
 - Webhook server production-ready
-- AI layer dengan intent processing
-- 1 MCP module (Akademik) terintegrasi
-- Ticket system via chat
-- **Goal**: 1 layanan berjalan end-to-end
+- AI agent with smart message routing
+- Full command system (30+ commands)
+- Ticket CRUD (create, read, update, delete, close, assign)
+- Backlog management (search, filter, bulk update)
+- Project tracking
+- Member & division lookup
+- Session management & follow-up detection
+- Outbound WhatsApp notifications to PIC
 
-### Phase 2: Expansion (8-12 minggu)
-- Multi MCP (Akademik + Admisi + Inventory + IT Support)
-- Enhanced AI (multi-turn conversation)
-- Dashboard monitoring
-- **Goal**: Multi-layanan, stabil
+### Phase 2: Enhancement (In Progress)
+- Broadcast notifications
+- Self-reference detection ("tugas gw")
+- Image attachment to tickets
+- LID resolution for privacy-mode WhatsApp
+- AI call logging & statistics
+- Notion webhook integration
 
-### Phase 3: Ecosystem (12-20 minggu)
-- Integrasi multi-instansi
-- Multi-organisasi support
-- Advanced analytics
-- **Goal**: Platform ecosystem
+### Phase 3: Scale (Planned)
+- Redis for persistent sessions
+- PostgreSQL for message logging
+- Admin dashboard
+- Multi-organization support
 
 ## 9. Risk Overview
 
 | Risk | Impact | Probability | Mitigation |
 |------|--------|-------------|------------|
-| WhatsApp API limitations | High | Medium | Riset API limits, fallback via SMS |
-| AI intent accuracy rendah | High | Medium | Training data, fallback ke human agent |
-| Backend system tidak siap API | High | High | Mock data dulu, gradual integration |
-| Security breach | Critical | Low | Encryption, auth, audit trail |
-| Scalability issues | Medium | Low | Queue-based architecture, caching |
+| Evolution API downtime | High | Low | Health check, auto-reconnect |
+| z.ai proxy rate limit | Medium | Medium | Retry with exponential backoff |
+| Notion API rate limit (3 req/s) | Medium | Medium | Rate limiter + caching |
+| WhatsApp number ban | High | Low | Follow WhatsApp ToS, rate limit messages |
+| Session data loss (in-memory) | Low | Medium | Accept for MVP, migrate to Redis |
 
 ## 10. Documentation Index
 
@@ -182,15 +177,14 @@ Komponen utama:
 | 00 | PROJECT-OVERVIEW | Dokumen ini — overview utama |
 | 01 | PRD | Product Requirements Document |
 | 02 | SYSTEM-ARCHITECTURE | Arsitektur sistem detail |
-| 03 | MCP-DESIGN | Desain MCP modules |
+| 03 | NOTION-INTEGRATION | Desain integrasi Notion API |
 | 04 | SPRINT-PLAN | Sprint planning & timeline |
 | 05 | USER-STORIES | Backlog user stories |
 | 06 | TEST-SCENARIOS | Skenario testing |
-| 07 | PROTOTYPING-GUIDE | Guide prototyping step-by-step |
+| 07 | DEPLOYMENT-GUIDE | Guide deployment & setup |
 | 08 | TECHNICAL-IMPLEMENTATION | Implementasi teknis detail |
-| 09 | ORCHESTRATOR-DESIGN | Desain orchestrator AI + MCP |
+| 09 | AGENT-DESIGN | Desain AI Agent Oro |
 | 10 | WHATSAPP-NOTIFICATION-OUTBOUND | Fitur notifikasi WA outbound ke PIC tiket |
-| 11 | IMPLEMENTATION-PROMPT | Prompt untuk implementasi fitur doc 10 |
 
 ---
 
@@ -198,20 +192,29 @@ Komponen utama:
 
 ```bash
 # Clone/setup project
-mkdir whatsapp-gateway && cd whatsapp-gateway
+cd whatsapp-gateway
 
 # Setup environment
 cp .env.example .env
-# Edit .env dengan API keys yang diperlukan
+# Edit .env dengan API keys yang diperlukan:
+# - ANTHROPIC_API_KEY (z.ai)
+# - NOTION_API_KEY
+# - NOTION_DATABASE_ID
+# - EVOLUTION_API_URL
+# - EVOLUTION_API_KEY
+# - EVOLUTION_INSTANCE_NAME
 
 # Install dependencies
 npm install
 
+# Build
+npm run build
+
 # Run development
 npm run dev
 
-# Run POC test
-npm run test:poc
+# Run with Docker
+docker compose up -d
 ```
 
 ---

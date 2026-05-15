@@ -1123,6 +1123,7 @@ async function handleSmartMessage(
 
     const parsed = extractJSON(textBlock.text);
     if (!parsed) {
+      console.log(`[Agent] AI raw response (unparseable): "${textBlock.text.slice(0, 500)}"`);
       throw new Error("Failed to parse AI response");
     }
 

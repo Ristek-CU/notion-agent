@@ -6,6 +6,9 @@ import { env } from "../config.js";
 import { appendImageBlock, invalidateCache } from "../notion/notion-api-core.js";
 import { searchBacklog } from "../notion/notion-org-service.js";
 import { resolveDisplayName } from "../services/contact-lookup.js";
+import { getAIStats } from "../ai/anthropic-client.js";
+import * as fs from "fs";
+import * as path from "path";
 
 // ─── Types ──────────────────────────────────────────────────────────
 
@@ -212,7 +215,15 @@ export async function registerWebhookRoutes(app: FastifyInstance) {
     const replyTarget = resolveReplyTarget(rawJid, isGroup, payload);
 
     // Extract sender phone number for contact lookup
-    const senderPhone = extractPhoneNumber(rawJid, payload);
+    // For @lid: try to extract from sender field first (contains real JID)
+    let senderPhone = extractPhoneNumber(rawJid, payload);
+    if (!senderPhone && rawJid.includes("@lid") && payload.sender) {
+      const senderJid = payload.sender;
+      if (senderJid.includes("@s.whatsapp.net")) {
+        senderPhone = senderJid.split("@")[0];
+        console.log(`[Webhook] Resolved sender phone from payload.sender: ${senderPhone}`);
+      }
+    }
     // Resolve display name: prioritas kontak DB (by phone/by pushName) > WhatsApp pushName
     const displayName = resolveDisplayName(senderPhone, pushName);
 
@@ -322,7 +333,15 @@ export async function registerWebhookRoutes(app: FastifyInstance) {
     }
 
     const replyTarget = resolveReplyTarget(rawJid, isGroup, payload);
-    const senderPhone = extractPhoneNumber(rawJid, payload);
+    // For @lid: try to extract from sender field first (contains real JID)
+    let senderPhone = extractPhoneNumber(rawJid, payload);
+    if (!senderPhone && rawJid.includes("@lid") && payload.sender) {
+      const senderJid = payload.sender;
+      if (senderJid.includes("@s.whatsapp.net")) {
+        senderPhone = senderJid.split("@")[0];
+        console.log(`[Webhook] Wildcard - Resolved sender phone from payload.sender: ${senderPhone}`);
+      }
+    }
     // Resolve display name: prioritas kontak DB (by phone/by pushName) > WhatsApp pushName
     const displayName = resolveDisplayName(senderPhone, pushName);
 
@@ -361,6 +380,36 @@ export async function registerWebhookRoutes(app: FastifyInstance) {
       status: "ok",
       timestamp: new Date().toISOString(),
       instance: env.EVOLUTION_INSTANCE_NAME,
+    };
+  });
+
+  /**
+   * GET /ai-stats — AI call statistics & recent logs
+   */
+  app.get("/ai-stats", async () => {
+    const stats = getAIStats();
+    let recentLogs: string[] = [];
+
+    try {
+      const logFile = path.resolve(process.cwd(), "logs", "ai-calls.csv");
+      if (fs.existsSync(logFile)) {
+        const content = fs.readFileSync(logFile, "utf-8");
+        const lines = content.trim().split("\n");
+        // Return last 50 entries (skip header)
+        recentLogs = lines.slice(Math.max(1, lines.length - 50));
+      }
+    } catch { /* ignore */ }
+
+    return {
+      stats: {
+        totalCalls: stats.totalCalls,
+        totalInputTokens: stats.totalInputTokens,
+        totalOutputTokens: stats.totalOutputTokens,
+        totalTokens: stats.totalInputTokens + stats.totalOutputTokens,
+        avgInferenceMs: stats.avgInferenceMs,
+        totalInferenceMs: stats.totalInferenceMs,
+      },
+      recentLogs,
     };
   });
 
@@ -425,9 +474,14 @@ function resolveReplyTarget(
 ): string {
   if (isGroup) return rawJid;
 
-  // For @lid: keep as-is — sender.ts will resolve it to real phone number
-  // via Evolution API findContacts before sending
+  // For @lid: try to use sender field (contains real @s.whatsapp.net JID)
   if (rawJid.includes("@lid")) {
+    if (payload.sender && payload.sender.includes("@s.whatsapp.net")) {
+      const realNumber = payload.sender.split("@")[0];
+      console.log(`[Webhook] Resolved reply target from sender field: ${rawJid} → ${realNumber}`);
+      return realNumber;
+    }
+    // Keep as-is — sender.ts will resolve it to real phone number
     return rawJid;
   }
 

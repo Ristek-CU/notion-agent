@@ -4,7 +4,14 @@ claude
 qrcode.png
 node_modules/
 .env
+.env.local
 __pycache__/
 *.pyc
 .vscode/
 .idea/
+dist/
+logs/
+*.log
+cache/
+lid-cache.json
+coverage/

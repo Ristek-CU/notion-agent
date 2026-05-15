@@ -1,0 +1,27 @@
+# Cloudflare Tunnel Config — WA Notion Bot
+# ============================================
+# Letakkan file ini di: ~/.cloudflared/config.yml
+# ATAU di project root sebagai reference
+#
+# SETUP:
+#   1. brew install cloudflared
+#   2. cloudflared tunnel login          → pilih domain lu
+#   3. cloudflared tunnel create wa-bot  → catat tunnel ID
+#   4. Copy tunnel ID ke bawah
+#   5. cloudflared tunnel route dns wa-bot <subdomain>.yourdomain.com
+#   6. Jalankan: ./scripts/start-tunnel.sh
+
+tunnel: <TUNNEL_ID_DISINI>
+credentials-file: /Users/mekari/.cloudflared/<TUNEL_ID_DISINI>.json
+
+ingress:
+  # Orchestrator (WA Bot) — webhook endpoint
+  - hostname: wa-bot.rpllearn.site
+    service: http://localhost:3000
+
+  # Evolution API Manager UI + API
+  - hostname: wa-api.rpllearn.site
+    service: http://localhost:8080
+
+  # Catch-all
+  - service: http_status:404

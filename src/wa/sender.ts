@@ -207,7 +207,35 @@ async function resolveLidToPhone(lidJid: string, pushName?: string): Promise<str
       }
     }
 
-    // Strategy 3: If LID number starts with country code, try it directly
+    // Strategy 3: Fast lookup via contacts.json using pushName (before expensive brute-force)
+    if (effectivePushName) {
+      const contact = findContactByPushName(effectivePushName);
+      if (contact) {
+        const realNumber = contact.phone;
+        console.log(`[WA Sender] Resolved LID ${lidJid} → ${realNumber} (via contacts.json pushName match: ${effectivePushName} → ${contact.name})`);
+        lidResolutionCache.set(lidJid, realNumber);
+        saveLidCache();
+        return realNumber;
+      }
+    }
+
+    // Strategy 4: Fuzzy match via MEMBER_NICKNAMES (Levenshtein tolerance)
+    // Uses the 120-entry nickname map + fuzzy matching from notion-org-service
+    if (effectivePushName) {
+      const resolvedName = resolveNickname(effectivePushName);
+      if (resolvedName) {
+        const contact = findPhoneByName(resolvedName);
+        if (contact) {
+          const realNumber = contact.phone;
+          console.log(`[WA Sender] Resolved LID ${lidJid} → ${realNumber} (via fuzzy nickname match: "${effectivePushName}" → "${resolvedName}")`);
+          lidResolutionCache.set(lidJid, realNumber);
+          saveLidCache();
+          return realNumber;
+        }
+      }
+    }
+
+    // Strategy 5: If LID number starts with country code, try it directly
     const lidNumber = lidJid.split("@")[0];
     if (lidNumber.startsWith("62")) {
       console.log(`[WA Sender] Trying LID number directly: ${lidNumber}`);
@@ -220,10 +248,10 @@ async function resolveLidToPhone(lidJid: string, pushName?: string): Promise<str
       }
     }
 
-    // Strategy 4: Brute-force — fetch profilePic for ALL @s.whatsapp.net contacts
-    // This is expensive but reliable when other strategies fail
+    // Strategy 6: Brute-force — fetch profilePic for ALL @s.whatsapp.net contacts
+    // EXPENSIVE: Only as last resort when all fast strategies fail
     if (lidProfilePic && waContacts.length > 0) {
-      console.log(`[WA Sender] Strategy 4: Checking profile pics for ${waContacts.length} WA contacts...`);
+      console.log(`[WA Sender] Strategy 6: Checking profile pics for ${waContacts.length} WA contacts...`);
       for (const candidate of waContacts) {
         try {
           const picEndpoint = `${env.EVOLUTION_API_URL}/chat/fetchProfilePictureUrl/${env.EVOLUTION_INSTANCE_NAME}`;
@@ -244,34 +272,6 @@ async function resolveLidToPhone(lidJid: string, pushName?: string): Promise<str
           }
         } catch {
           // Skip
-        }
-      }
-    }
-
-    // Strategy 5: Lookup via contacts.json using pushName
-    if (effectivePushName) {
-      const contact = findContactByPushName(effectivePushName);
-      if (contact) {
-        const realNumber = contact.phone;
-        console.log(`[WA Sender] Resolved LID ${lidJid} → ${realNumber} (via contacts.json pushName match: ${effectivePushName} → ${contact.name})`);
-        lidResolutionCache.set(lidJid, realNumber);
-        saveLidCache();
-        return realNumber;
-      }
-    }
-
-    // Strategy 6: Fuzzy match via MEMBER_NICKNAMES (Levenshtein tolerance)
-    // Uses the 120-entry nickname map + fuzzy matching from notion-org-service
-    if (effectivePushName) {
-      const resolvedName = resolveNickname(effectivePushName);
-      if (resolvedName) {
-        const contact = findPhoneByName(resolvedName);
-        if (contact) {
-          const realNumber = contact.phone;
-          console.log(`[WA Sender] Resolved LID ${lidJid} → ${realNumber} (via fuzzy nickname match: "${effectivePushName}" → "${resolvedName}")`);
-          lidResolutionCache.set(lidJid, realNumber);
-          saveLidCache();
-          return realNumber;
         }
       }
     }

@@ -302,9 +302,10 @@ export function resolveNickname(name: string): string | null {
     }
   }
 
-  // 3. Fuzzy match (Levenshtein distance) — only for short inputs (≤ 10 chars)
-  // Allow max 2 edits for words ≤ 5 chars, max 3 edits for words ≤ 10 chars
-  if (lower.length <= 10) {
+  // 3. Fuzzy match (Levenshtein distance) — only for inputs > 4 chars
+  // Skip fuzzy for very short inputs (≤ 4 chars) to avoid false positives
+  // e.g. "luna" should NOT match "gina" (dist 2)
+  if (lower.length > 4 && lower.length <= 10) {
     const maxDist = lower.length <= 5 ? 2 : 3;
     let bestMatch: string | null = null;
     let bestDist = maxDist + 1;

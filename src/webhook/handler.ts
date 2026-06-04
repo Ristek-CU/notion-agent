@@ -1,11 +1,12 @@
 // src/webhook/handler.ts
 import { FastifyInstance } from "fastify";
 import { handleMessage, handleChat, type MessageContext } from "../ai/agent.js";
-import { replyToGroup, sendDirectMessage, fetchBotJid, lookupLidCache } from "../wa/sender.js";
+import { replyToGroup, sendDirectMessage, fetchBotJid } from "../wa/sender.js";
 import { env } from "../config.js";
 import { appendImageBlock, invalidateCache } from "../notion/notion-api-core.js";
-import { searchBacklog } from "../notion/notion-org-service.js";
-import { resolveDisplayName } from "../services/contact-lookup.js";
+import { searchBacklog, resolveNickname } from "../notion/notion-org-service.js";
+import { findContactByPushName, findPhoneByName } from "../services/contact-lookup.js";
+import { resolveIdentity, type IdentityInput } from "../services/identity-resolver.js";
 import { getAIStats } from "../ai/anthropic-client.js";
 import * as fs from "fs";
 import * as path from "path";
@@ -102,6 +103,102 @@ setInterval(() => {
 // Prevents duplicate processing when Evolution API sends the same
 // webhook to both /webhook/:instance and /webhook/:instance/EVENT
 const processedMsgIds = new Map<string, number>();
+
+// ─── Out-of-Scope Guard ────────────────────────────────────────────
+// Detects programming/out-of-scope requests BEFORE they reach the AI.
+// This is a hard code-level guard that cannot be bypassed by prompt tricks.
+
+const PROGRAMMING_PATTERNS: RegExp[] = [
+  // Programming languages
+  /\b(python|javascript|js|typescript|ts|java\b|php|ruby|go\b|rust|swift|kotlin|c\+\+|c#|perl|r\b|scala|dart)\b/i,
+  // Code-related keywords
+  /\b(kode|code|coding|script|function|class|variable|array|loop|syntax|compile|runtime|library|framework|module|import|export|npm|pip|git\b|github)\b/i,
+  // Programming tools & concepts
+  /\b(algoritma|algorithm|debug|deploy|docker|kubernetes|aws|gcp|azure|devops|rest api|api endpoint|sql|database|mongodb|postgres|redis|express|react|vue|angular|node\b|nodejs|nextjs)\b/i,
+  // Programming request patterns
+  /\b(bikin\s*(app|website|bot|script|program|aplikasi)|cara\s*(deploy|coding|program|buat\s*app)|tulisin?\s*(kode|code)|ajarin?\s*(coding|kode|program)|bantu\s*(coding|debug|kode)|pseudocode)\b/i,
+];
+
+// Separate out-of-scope patterns — these are non-programming topics the bot should not help with
+const OUT_OF_SCOPE_PATTERNS: RegExp[] = [
+  // Food & recipes
+  /\b(resep|masak(an)?|masakan|memasak|makanan|cook)\b/i,
+  // Stories & entertainment
+  /\b(cerita|story|stories|horor|horror|serem|joke|lelucon|humor|lucu|komedi|dongeng)\b/i,
+  // Personal / emotional
+  /\b(curhat|curhatan|keluh|kesah|stres|stress|depresi|sedih|galau|patah\s*hati|pacar|mantan|Approch|crush|naksir|sayang|cinta)\b/i,
+  // Academic homework
+  /\b(pr\b|makalah|tugas\s*kuliah|essay|karya\s*tulis|skripsi|thesis|disertasi|ujian)\b/i,
+  // Science & math
+  /\b(fisika|kimia|matematika|integral|kalkulus|algebra|biologi|sains)\b/i,
+  // Entertainment recommendations
+  /\b(rekomendasi\s*(film|lagu|buku|musik|movie)|translate|terjemah|lagu|film|movie|musik|game|main)\b/i,
+  // Asking about bot internals / security
+  /\b(api\s*key|token|password|secret|credential|konfigurasi\s*server|server\s*setup)\b/i,
+];
+
+// Whitelist: words that look like programming but are valid SGA context
+const SGA_WHITELIST_PATTERNS: RegExp[] = [
+  /\b(bikin|buat)\s*(tiket|backlog|tugas|task|database)\b/i,
+  /\b(assign|update|status|deploy\s*tiket)\b/i,
+  /\b(project|deadline|prioritas|divisi)\b/i,
+  /\b(cek|lihat|tampilkan)\s*(backlog|tiket|status|progress|tugas)\b/i,
+  /\b(notification|webhook)\b/i,
+  // "error" in context of SGA tickets (not code errors)
+  /\b(ada\s*eror|fix\s*bug|bug\s*di)\b/i,
+  // "tugas" in SGA context (backlog/task, not homework)
+  /\b(tugas\s*(iqbal|raihan|fazril|thoriq|iqbal|dian|sharon|azka|sevilla|diva|mika))\b/i,
+  /\b(ada\s*tugas|tugas\s*(apa|siapa|berapa|yang|belum|sudah|open|done))\b/i,
+];
+
+/**
+ * Check if a message is out of scope (programming, recipes, etc.)
+ * Returns a rejection message if blocked, or null if allowed.
+ */
+function checkOutOfScope(text: string, pushName: string): string | null {
+  const normalized = text.toLowerCase().trim();
+
+  // Skip very short messages (greetings, commands)
+  if (normalized.length < 5) return null;
+
+  // Check whitelist first — if it matches SGA context, allow it
+  for (const pattern of SGA_WHITELIST_PATTERNS) {
+    if (pattern.test(normalized)) return null;
+  }
+
+  // Count programming pattern matches
+  let programmingMatches = 0;
+  for (const pattern of PROGRAMMING_PATTERNS) {
+    if (pattern.test(normalized)) programmingMatches++;
+  }
+
+  // Count out-of-scope pattern matches
+  let oosMatches = 0;
+  for (const pattern of OUT_OF_SCOPE_PATTERNS) {
+    if (pattern.test(normalized)) oosMatches++;
+  }
+
+  // Detect if user is asking/requesting something (question/request signals)
+  const isAskingForSomething = /\b(bisa|bantuin|ajarin|tolong|cara|gimana|how|teach|explain|bantu|dong|gak|donk|deh|ya|khan|kah|please|kasih|beri|punya|ada\s*gak|ada\s*gk|mau|pengen|pingin|pengin|butuh|perlu)\b/i.test(normalized);
+
+  // DECISION LOGIC:
+  // 1. Programming: block if 2+ patterns, OR 1+ pattern + asking
+  // 2. Out-of-scope: block if 1+ pattern + asking (lower threshold because OOS patterns are very specific)
+  // 3. Strong OOS match: block if 2+ OOS patterns even without question words
+  const shouldBlock =
+    programmingMatches >= 2 ||
+    (programmingMatches >= 1 && isAskingForSomething) ||
+    oosMatches >= 2 ||
+    (oosMatches >= 1 && isAskingForSomething);
+
+  if (shouldBlock) {
+    console.log(`[Guard] BLOCKED out-of-scope message (prog: ${programmingMatches}, oos: ${oosMatches}, asking: ${isAskingForSomething}): "${text.slice(0, 80)}"`);
+    const name = pushName || "";
+    return `Waduh${name ? ` ${name}` : ""}, aku cuma bisa bantu urusan tiket dan backlog SGA nih. Yang lain di luar jatah aku ya! Mau bikin tiket atau cek backlog aja? 😄`;
+  }
+
+  return null;
+}
 
 // ─── Webhook Routes ─────────────────────────────────────────────────
 
@@ -211,29 +308,60 @@ export async function registerWebhookRoutes(app: FastifyInstance) {
       cleanText = stripMentionFromText(messageText, await getBotJid());
     }
 
-    // Extract reply target
-    const replyTarget = resolveReplyTarget(rawJid, isGroup, payload);
-
-    // Extract sender phone number for contact lookup
-    // For @lid: try to extract from sender field, but skip if it's the bot's own JID
-    let senderPhone = extractPhoneNumber(rawJid, payload);
-    if (!senderPhone && rawJid.includes("@lid") && payload.sender) {
-      const senderJid = payload.sender;
-      const botNumber = botJid ? botJid.split("@")[0] : "";
-      if (senderJid.includes("@s.whatsapp.net")) {
-        const extracted = senderJid.split("@")[0];
-        if (extracted !== botNumber) {
-          senderPhone = extracted;
-          console.log(`[Webhook] Resolved sender phone from payload.sender: ${senderPhone}`);
-        }
-      }
+    // Ensure botJid is initialized before resolving reply target
+    // (initBotJid may have failed at startup if Evolution API wasn't ready yet)
+    try {
+      if (!botJid) botJid = await getBotJid();
+    } catch {
+      console.error("[Webhook] Failed to fetch bot JID — reply target resolution may be incorrect!");
     }
-    // Resolve display name: prioritas kontak DB (by phone/by pushName) > WhatsApp pushName
-    const displayName = resolveDisplayName(senderPhone, pushName);
+
+    // Resolve sender identity using all available signals (phone, pushName, LID)
+    const identityInput: IdentityInput = {
+      rawJid,
+      pushName,
+      sender: payload.sender,
+      participant: payload.data?.participant,
+      botJid,
+    };
+    const resolvedIdentity = resolveIdentity(identityInput);
+    console.log(`[Webhook] Identity: ${resolvedIdentity.name} (phone: ${resolvedIdentity.phone || "unknown"}, method: ${resolvedIdentity.resolutionMethod})`);
+
+    // Extract reply target
+    let replyTarget = resolveReplyTarget(rawJid, isGroup, payload);
+    // Fast override: if identity resolver found the phone for @lid, use it directly
+    if (rawJid.includes("@lid") && resolvedIdentity.phone && !isGroup) {
+      replyTarget = resolvedIdentity.phone;
+      console.log(`[Webhook] Reply target overridden by identity resolver: ${replyTarget}`);
+    }
+
+    // Use resolved identity for sender info
+    const senderPhone = resolvedIdentity.phone;
+    const displayName = resolvedIdentity.name;
 
     console.log(
       `[Webhook] ${isGroup ? "GROUP" : "DM"} from ${displayName}${isBotMentioned ? " (mentioned)" : ""}: ${cleanText.slice(0, 100)}`
     );
+
+    // ─── Out-of-Scope Guard ─────────────────────────────────────────
+    // Block programming/out-of-scope requests BEFORE they reach AI
+    const guardResponse = checkOutOfScope(cleanText, displayName);
+    if (guardResponse) {
+      console.log(`[Webhook] Guard blocked message, sending rejection`);
+      setImmediate(async () => {
+        try {
+          if (isGroup) {
+            await replyToGroup(instanceName, replyTarget, guardResponse, pushName);
+          } else {
+            await sendDirectMessage(instanceName, replyTarget, guardResponse, pushName);
+          }
+          console.log(`[Webhook] Guard rejection sent to ${pushName}`);
+        } catch (error) {
+          console.error("[Webhook] Guard rejection send error:", error);
+        }
+      });
+      return reply.code(200).send({ status: "blocked_by_guard" });
+    }
 
     // Process message asynchronously (don't block the webhook response)
     setImmediate(async () => {
@@ -242,6 +370,7 @@ export async function registerWebhookRoutes(app: FastifyInstance) {
           phoneNumber: replyTarget.includes("@g.us") ? rawJid : replyTarget,
           pushName: displayName,
           senderPhone: senderPhone ?? undefined,
+          resolvedIdentity,
           isGroup,
           isBotMentioned,
         };
@@ -336,24 +465,51 @@ export async function registerWebhookRoutes(app: FastifyInstance) {
       cleanText = stripMentionFromText(messageText, await getBotJid());
     }
 
-    const replyTarget = resolveReplyTarget(rawJid, isGroup, payload);
-    // For @lid: try to extract from sender field, but skip if it's the bot's own JID
-    let senderPhone = extractPhoneNumber(rawJid, payload);
-    if (!senderPhone && rawJid.includes("@lid") && payload.sender) {
-      const senderJid = payload.sender;
-      const botNumber = botJid ? botJid.split("@")[0] : "";
-      if (senderJid.includes("@s.whatsapp.net")) {
-        const extracted = senderJid.split("@")[0];
-        if (extracted !== botNumber) {
-          senderPhone = extracted;
-          console.log(`[Webhook] Wildcard - Resolved sender phone from payload.sender: ${senderPhone}`);
-        }
-      }
+    // Ensure botJid is initialized before resolving reply target
+    try {
+      if (!botJid) botJid = await getBotJid();
+    } catch {
+      console.error("[Webhook] Wildcard — Failed to fetch bot JID!");
     }
-    // Resolve display name: prioritas kontak DB (by phone/by pushName) > WhatsApp pushName
-    const displayName = resolveDisplayName(senderPhone, pushName);
+
+    // Resolve sender identity using all available signals
+    const resolvedIdentity = resolveIdentity({
+      rawJid,
+      pushName,
+      sender: payload.sender,
+      participant: payload.data?.participant,
+      botJid,
+    });
+    console.log(`[Webhook] Wildcard Identity: ${resolvedIdentity.name} (phone: ${resolvedIdentity.phone || "unknown"}, method: ${resolvedIdentity.resolutionMethod})`);
+
+    let replyTarget = resolveReplyTarget(rawJid, isGroup, payload);
+    // Fast override: if identity resolver found the phone for @lid, use it directly
+    if (rawJid.includes("@lid") && resolvedIdentity.phone && !isGroup) {
+      replyTarget = resolvedIdentity.phone;
+    }
+    const senderPhone = resolvedIdentity.phone;
+    const displayName = resolvedIdentity.name;
 
     console.log(`[Webhook] Wildcard - ${isGroup ? "GROUP" : "DM"} from ${displayName}${isBotMentioned ? " (mentioned)" : ""}`);
+
+    // ─── Out-of-Scope Guard (wildcard route) ────────────────────────
+    const guardResponse = checkOutOfScope(cleanText, displayName);
+    if (guardResponse) {
+      console.log(`[Webhook] Wildcard guard blocked message`);
+      setImmediate(async () => {
+        try {
+          if (isGroup) {
+            await replyToGroup(instanceName, replyTarget, guardResponse, pushName);
+          } else {
+            await sendDirectMessage(instanceName, replyTarget, guardResponse, pushName);
+          }
+          console.log(`[Webhook] Wildcard guard rejection sent to ${pushName}`);
+        } catch (error) {
+          console.error("[Webhook] Wildcard guard rejection send error:", error);
+        }
+      });
+      return reply.code(200).send({ status: "blocked_by_guard" });
+    }
 
     setImmediate(async () => {
       try {
@@ -361,6 +517,7 @@ export async function registerWebhookRoutes(app: FastifyInstance) {
           phoneNumber: replyTarget.includes("@g.us") ? rawJid : replyTarget,
           pushName: displayName,
           senderPhone: senderPhone ?? undefined,
+          resolvedIdentity,
           isGroup,
           isBotMentioned,
         };
@@ -475,6 +632,32 @@ export async function registerWebhookRoutes(app: FastifyInstance) {
 
 // ─── Helpers ────────────────────────────────────────────────────────
 
+/**
+ * Fast LID resolution via pushName from contacts.json.
+ * Tries: exact pushName match → nickname resolution → fuzzy match.
+ * Returns real phone number or null if not found.
+ */
+function resolveLidViaPushName(pushName: string, _lidJid: string): string | null {
+  // 1. Direct pushName match in contacts.json
+  const contact = findContactByPushName(pushName);
+  if (contact) {
+    console.log(`[Webhook] Resolved @lid via pushName contacts match: "${pushName}" → ${contact.phone} (${contact.name})`);
+    return contact.phone;
+  }
+
+  // 2. Try nickname resolution (e.g. "ojan" → "Andi Fauzan H")
+  const resolvedName = resolveNickname(pushName);
+  if (resolvedName) {
+    const contactByName = findPhoneByName(resolvedName);
+    if (contactByName) {
+      console.log(`[Webhook] Resolved @lid via nickname match: "${pushName}" → "${resolvedName}" → ${contactByName.phone}`);
+      return contactByName.phone;
+    }
+  }
+
+  return null;
+}
+
 function resolveReplyTarget(
   rawJid: string,
   isGroup: boolean,
@@ -483,8 +666,8 @@ function resolveReplyTarget(
   if (isGroup) return rawJid;
 
   // For @lid: the sender field often contains the BOT's own JID (not the real sender).
-  // Only use payload.sender if it's NOT the bot. Otherwise, pass @lid through
-  // and let sender.ts resolve it via resolveLidToPhone().
+  // Only use payload.sender if it's NOT the bot. Otherwise, try to resolve via
+  // pushName from contacts.json first (fast), then fall back to LID resolver.
   if (rawJid.includes("@lid")) {
     if (payload.sender && payload.sender.includes("@s.whatsapp.net")) {
       const senderNumber = payload.sender.split("@")[0];
@@ -493,8 +676,14 @@ function resolveReplyTarget(
         console.log(`[Webhook] Resolved reply target from sender field: ${rawJid} → ${senderNumber}`);
         return senderNumber;
       }
-      // payload.sender is the bot itself — ignore it, let LID resolver handle it
-      console.log(`[Webhook] payload.sender is bot's own JID, passing @lid to LID resolver`);
+      // payload.sender is the bot itself — try to resolve via pushName from contacts.json
+      console.log(`[Webhook] payload.sender is bot's own JID, attempting pushName resolution`);
+    }
+    // Try to resolve @lid via pushName lookup in contacts.json (fast path)
+    const pushName = payload.data?.pushName || "";
+    if (pushName) {
+      const resolved = resolveLidViaPushName(pushName, rawJid);
+      if (resolved) return resolved;
     }
     // Keep as-is — sender.ts will resolve it to real phone number via resolveLidToPhone()
     return rawJid;
@@ -588,30 +777,6 @@ async function handleImageAttachment(
   } catch (error) {
     console.error(`[Webhook] Failed to attach image to ticket ${ticket.name}:`, error);
   }
-}
-
-/**
- * Extract phone number from JID or payload for contact lookup.
- * Returns normalized phone number (digits only) or null.
- */
-function extractPhoneNumber(rawJid: string, payload: WAWebhookPayload): string | null {
-  // Direct @s.whatsapp.net — extract phone number
-  if (rawJid.includes("@s.whatsapp.net")) {
-    return rawJid.split("@")[0];
-  }
-
-  // Participant fallback (group messages)
-  if (payload.data?.participant?.includes("@s.whatsapp.net")) {
-    return payload.data.participant.split("@")[0];
-  }
-
-  // For @lid — resolve via LID cache (maps LID → real phone number)
-  if (rawJid.includes("@lid")) {
-    const resolved = lookupLidCache(rawJid);
-    if (resolved) return resolved;
-  }
-
-  return null;
 }
 
 /**

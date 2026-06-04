@@ -3,6 +3,7 @@ import { createMessage } from "./anthropic-client.js";
 import { EXTRACTION_PROMPT, CHAT_PROMPT, CASUAL_WRAP_PROMPT } from "./prompts.js";
 import { notifyPIC } from "../services/notification.js";
 import { getFullName } from "../services/contact-lookup.js";
+import type { ResolvedIdentity } from "../services/identity-resolver.js";
 import {
   getOrCreateSession,
   saveUserMessage,
@@ -196,6 +197,7 @@ export interface MessageContext {
   phoneNumber: string;
   pushName: string;
   senderPhone?: string;  // Nomor HP asli pengirim untuk contact lookup
+  resolvedIdentity?: ResolvedIdentity;  // Identity resolved from phone/pushName/LID
   groupName?: string;
   isGroup: boolean;
   isBotMentioned?: boolean;
@@ -722,6 +724,15 @@ async function handleSmartMessage(
 
   const userPhone = context.senderPhone || context.phoneNumber;
 
+  // ─── Typo normalizer ──────────────────────────────────────────────
+  // Common typos that break intent detection
+  const normalizedMsg = message
+    .replace(/\bkirik\b/gi, "kirim")
+    .replace(/\bkirum\b/gi, "kirim")
+    .replace(/\bkirin\b/gi, "kirim")
+    .replace(/\bkiri\b/gi, "kirim");
+  const lowerMsg = normalizedMsg.toLowerCase();
+
   // ─── Check for follow-up question (before any other detection) ───
   const followUp = detectFollowUp(message, userPhone);
   if (followUp) {
@@ -798,7 +809,7 @@ async function handleSmartMessage(
   }
 
   // ─── Prepare lowercase message for all detection logic ───
-  const lowerMsg = message.toLowerCase();
+  // (lowerMsg already defined above with typo normalization)
 
   // ─── BROADCAST INTENT: mass task distribution (must be FIRST before any other detection) ───
   // "kirim semua notifikasi ke semua anggota sga sesuai tasknya masing masing"
@@ -814,6 +825,17 @@ async function handleSmartMessage(
   ];
 
   const isBroadcastIntent = broadcastPatterns.some(p => p.test(lowerMsg));
+
+  // Division broadcast: "kirim alert ke divisi ristek", "ingetin anggota divisi bnp"
+  const divisionBroadcastMatch = lowerMsg.match(
+    /\b(?:kirim|broadcast|sebar|ingetin|peringatan|alert|notif(?:ikasi)?)\s+(?:(?:semua|seluruh)?\s*(?:anggota\s+)?)?(?:ke\s+)?(?:divisi\s+)?(ristek|tech|teknologi|media|minfo|pcr|humas|pubcom|bnp|bisnis|icd|advo|advokasi|ukm|keuangan|treasurer|controller|secretary|bph)/i
+  );
+  if (divisionBroadcastMatch) {
+    const divisionName = divisionBroadcastMatch[1];
+    console.log(`[Agent] DIVISION BROADCAST intent: "${divisionName}" from ${context.pushName}`);
+    return await handleDivisionBroadcast(divisionName, context);
+  }
+
   if (isBroadcastIntent) {
     console.log(`[Agent] BROADCAST intent detected from ${context.pushName}: "${message.slice(0, 80)}"`);
     return await handleBroadcastTaskNotifications(context);
@@ -832,6 +854,8 @@ async function handleSmartMessage(
   // Patterns that indicate user is asking about someone else's tasks:
   // IMPORTANT: Order matters — more specific patterns first
   const memberNamePatterns = [
+    // "peringatan ke robby", "alert ke ivan", "infoin ke faza", "kabarin robby", "suruh robby"
+    /(?:peringatan|alert|info(?:in)?|kabar(?:in)?|suruh|panggil)\s+(?:(?:ke|untuk)\s+)?(\w+(?:\s+\w+)?)/i,
     // "kirim pesan ke faza", "kirim ke farhan", "kasih tau faza", "ingetin iqbal"
     // This must come FIRST because "kirim pesan ke X" clearly identifies X as the target
     /(?:kirim(?:kan)?\s+(?:pesan\s+)?(?:ke|untuk)\s+|kasih\s+(?:tau|tahu|info|pesan|remainder|reminder|inget|ingetin)\s+(?:(?:ke|untuk)\s+)?|notify\s+|ingetin\s+(?:(?:ke|untuk)\s+)?|remainder\s+(?:ke|untuk)?\s*|reminder\s+(?:ke|untuk)?\s*)(\w+)/i,
@@ -893,20 +917,32 @@ async function handleSmartMessage(
   if (extractedMemberName) {
     console.log(`[Agent] Member tasks for "${extractedMemberName}" (takes priority over self-ref) from "${message.slice(0, 60)}"`);
     try {
-      const resolvedNick = resolveNickname(extractedMemberName);
+      let resolvedNick = resolveNickname(extractedMemberName);
+
+      // Fallback: if resolveNickname fails, try findPhoneByName for partial name match
+      // e.g. "luna" should match "Defa Luna" via name field, not via fuzzy nickname
+      if (!resolvedNick) {
+        const { findPhoneByName } = await import("../services/contact-lookup.js");
+        const contactByPartialName = findPhoneByName(extractedMemberName);
+        if (contactByPartialName) {
+          resolvedNick = contactByPartialName.name;
+          console.log(`[Agent] Resolved "${extractedMemberName}" via contacts.json partial name match → "${resolvedNick}"`);
+        }
+      }
+
       const searchName = resolvedNick || extractedMemberName;
       const displayName = resolvedNick
         ? resolvedNick.split(" ")[0]
         : extractedMemberName.charAt(0).toUpperCase() + extractedMemberName.slice(1);
 
       // Check if this is a "kirim pesan ke X" intent — send notification to that person
-      const isNotifyIntent = /(?:kirim(?:kan)?\s+(?:pesan\s+)?(?:ke|untuk)|kasih\s+(?:tau|tahu|info|remainder|reminder|inget)|notify|ingetin\s+(?:ke|untuk)?|remainder|reminder)/i.test(lowerMsg);
+      const isNotifyIntent = /(?:kirim(?:kan)?\s+(?:pesan\s+)?(?:ke|untuk)|kasih\s+(?:tau|tahu|info|remainder|reminder|inget)|notify|ingetin\s+(?:ke|untuk)?|remainder|reminder|peringatan|alert|info(?:in)?|kabar(?:in)?)\s*(?:ke|untuk)?/i.test(lowerMsg);
 
       // Determine if user wants member's own tasks only, or ALL backlog
-      // "tugas ivan", "tugasnya ivan", "task punya ivan" = member's tasks only
+      // "tugas ivan", "tugasnya ivan", "task punya ivan", "tugasnya apa aja" = member's tasks only
       // "kirimin tiket ke ivan", "kasih info ke ivan" = ALL backlog to that person
-      const wantsOwnTasksOnly = /\b(?:tugas(?:nya)?|task(?:nya)?|tiket(?:nya)?\s+(?:dia|punya|milik))\b/i.test(lowerMsg) &&
-        !/\b(?:semua|semuanya|apa\s+aja|apa\s+saja|all)\b/i.test(lowerMsg);
+      const wantsOwnTasksOnly = /\b(?:tugas(?:nya)?|task(?:nya)?|tiket(?:nya)?)\b/i.test(lowerMsg) &&
+        !/\b(?:semua\s+(?:backlog|tugas|tiket|task)|seluruh\s+(?:backlog|tugas|tiket|task))\b/i.test(lowerMsg);
 
       if (isNotifyIntent && !wantsOwnTasksOnly) {
         // Notify intent: send ALL backlog to the member
@@ -947,7 +983,7 @@ async function handleSmartMessage(
           const { env } = await import("../config.js");
           const picContact = findPhoneByName(extractedMemberName);
           if (picContact) {
-            const senderName = context.senderPhone ? getFullNameLookup(context.senderPhone) || context.pushName : context.pushName;
+            const senderName = context.resolvedIdentity?.name || (context.senderPhone ? getFullNameLookup(context.senderPhone) : null) || context.pushName;
             const notifyMsg = `Hai ${displayName}! \u{1F44B}\n\n${senderName} minta aku buat ngasih info *SELURUH* backlog SGA:\n\n` +
               Object.entries(grouped).map(([status, group]) =>
                 `${getStatusEmoji(status)} *${status}* (${group.length}):\n` +
@@ -1014,7 +1050,7 @@ async function handleSmartMessage(
           const { env } = await import("../config.js");
           const picContact = findPhoneByName(extractedMemberName);
           if (picContact) {
-            const senderName = context.senderPhone ? getFullNameLookup(context.senderPhone) || context.pushName : context.pushName;
+            const senderName = context.resolvedIdentity?.name || (context.senderPhone ? getFullNameLookup(context.senderPhone) : null) || context.pushName;
             const notifyMsg = `Hai ${displayName}! 👋\n\n${senderName} minta aku buat ngasih info tugas kamu di backlog SGA:\n\n` +
               items.slice(0, 10).map((item, i) => `${i + 1}. ${getStatusEmoji(item.status)} ${item.name} (${item.status})`).join("\n") +
               `\n\nTotal: ${items.length} tugas. Cek detailnya di Notion ya!`;
@@ -1056,10 +1092,21 @@ async function handleSmartMessage(
 
   const isSelfRef = (taskKeyword.test(lowerMsg) && selfPronouns.test(lowerMsg)) || shortQueryDong.test(lowerMsg);
 
-  if (isSelfRef && context.senderPhone) {
-    const fullName = getFullName(context.senderPhone);
+  if (isSelfRef) {
+    // Resolve fullName: prefer resolvedIdentity (works for @lid users), then senderPhone
+    let fullName: string | null = null;
+    let resolutionMethod = "unknown";
+
+    if (context.resolvedIdentity?.name && context.resolvedIdentity.phone) {
+      fullName = context.resolvedIdentity.name;
+      resolutionMethod = context.resolvedIdentity.resolutionMethod;
+    } else if (context.senderPhone) {
+      fullName = getFullName(context.senderPhone);
+      resolutionMethod = "senderPhone";
+    }
+
     if (fullName) {
-      console.log(`[Agent] Self-reference detected from ${context.pushName} (phone: ${context.senderPhone}), resolved to: "${fullName}", querying backlog`);
+      console.log(`[Agent] Self-reference detected from ${context.pushName}, resolved to: "${fullName}" via ${resolutionMethod}, querying backlog`);
       try {
         const items = await getBacklogByMemberName(fullName);
         if (items.length === 0) {
@@ -1085,7 +1132,7 @@ async function handleSmartMessage(
         return "Waduh, gagal ambil data tugas kamu nih. Coba lagi nanti ya!";
       }
     } else {
-      console.log(`[Agent] Self-reference detected but phone ${context.senderPhone} not found in contacts`);
+      console.log(`[Agent] Self-reference detected but could not resolve identity for pushName "${context.pushName}"`);
       return `Hmm, nomor kamu belum terdaftar di database aku nih ${context.pushName}. Jadi aku belum bisa cek tugas kamu. Hubungi admin buat daftarin nomor kamu ya!`;
     }
   }
@@ -2362,6 +2409,108 @@ async function handleBroadcastTaskNotifications(_context: MessageContext): Promi
 
   console.log(`[Agent] Broadcast complete: ${notified} sent, ${noTasks} no tasks, ${failed} failed, ${skipped} skipped`);
 
+  return summary;
+}
+
+/**
+ * Send personalized task notifications to all members of a specific division.
+ */
+async function handleDivisionBroadcast(divisionInput: string, _context: MessageContext): Promise<string> {
+  console.log(`[Agent] Starting division broadcast for: "${divisionInput}"`);
+
+  const { getAllContacts } = await import("../services/contact-lookup.js");
+  const { sendDirectMessage } = await import("../wa/sender.js");
+  const { env } = await import("../config.js");
+  const { resolveDivisionAlias } = await import("../notion/notion-org-service.js");
+
+  // Resolve division alias (e.g. "ristek" → "Research and Technology")
+  const resolvedDivision = resolveDivisionAlias(divisionInput) || divisionInput;
+  console.log(`[Agent] Division resolved: "${divisionInput}" → "${resolvedDivision}"`);
+
+  const allContacts = getAllContacts();
+  const divisionContacts = allContacts.filter(c =>
+    c.division?.toLowerCase().includes(resolvedDivision.toLowerCase()) ||
+    resolvedDivision.toLowerCase().includes(c.division?.toLowerCase() || "")
+  );
+
+  if (divisionContacts.length === 0) {
+    return `Waduh, aku gak nemu anggota divisi "${divisionInput}" nih. Coba cek nama divisinya ya! Ketik *!divisions* buat lihat daftar divisi.`;
+  }
+
+  console.log(`[Agent] Division broadcast: ${divisionContacts.length} contacts in "${resolvedDivision}"`);
+
+  const activeStatuses = ["Not started", "In progress", "Need to review", "Need to fix", "Blocking"];
+  let notified = 0;
+  let noTasks = 0;
+  let failed = 0;
+  let skipped = 0;
+
+  for (const contact of divisionContacts) {
+    const nickname = contact.nickname || contact.name.split(" ")[0];
+    const phone = contact.phone;
+
+    try {
+      const allItems = await getBacklogByMemberName(contact.name);
+      const activeItems = allItems.filter(item =>
+        activeStatuses.some(s => item.status.toLowerCase().includes(s.toLowerCase()))
+      );
+
+      if (activeItems.length === 0) {
+        noTasks++;
+        console.log(`[Agent] Division broadcast: skip ${nickname} — no active tasks`);
+        continue;
+      }
+
+      if (!phone || phone.length < 10) {
+        skipped++;
+        continue;
+      }
+
+      const displayName = nickname.charAt(0).toUpperCase() + nickname.slice(1);
+      let personalMsg = `Halo ${displayName}! 👋\n\n`;
+      personalMsg += `Ini reminder dari kadiv/wakadiv divisi *${resolvedDivision}* nih.\n`;
+      personalMsg += `Berikut tugas kamu yang masih aktif di backlog SGA:\n\n`;
+
+      for (const item of activeItems.slice(0, 10)) {
+        const emoji = getStatusEmoji(item.status);
+        personalMsg += `${emoji} ${item.name}\n`;
+        personalMsg += `   Status: ${item.status} | Priority: ${item.priority}`;
+        if (item.projects.length > 0) {
+          personalMsg += ` | Project: ${item.projects.join(", ")}`;
+        }
+        personalMsg += `\n   ${item.url}\n`;
+      }
+
+      if (activeItems.length > 10) {
+        personalMsg += `\n...dan ${activeItems.length - 10} task lainnya.\n`;
+      }
+
+      personalMsg += `\nTotal: ${activeItems.length} task aktif. Gas kerjain ya! Semangat! 🔥`;
+
+      try {
+        await sendDirectMessage(env.EVOLUTION_INSTANCE_NAME, phone, personalMsg);
+        notified++;
+        console.log(`[Agent] Division broadcast: sent to ${displayName} — ${activeItems.length} tasks`);
+      } catch (sendError) {
+        failed++;
+        console.error(`[Agent] Division broadcast: FAILED for ${displayName}:`, sendError);
+      }
+
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    } catch (error) {
+      failed++;
+      console.error(`[Agent] Division broadcast: error for ${nickname}:`, error);
+    }
+  }
+
+  const summary = `*Broadcast Divisi ${resolvedDivision} Selesai!* 🔥\n\n` +
+    `Total anggota: ${divisionContacts.length}\n` +
+    `Notifikasi terkirim: ${notified}\n` +
+    `Tidak ada task aktif: ${noTasks}\n` +
+    `Gagal kirim: ${failed}\n` +
+    `Di-skip: ${skipped}`;
+
+  console.log(`[Agent] Division broadcast complete: ${notified} sent, ${noTasks} no tasks, ${failed} failed`);
   return summary;
 }
 

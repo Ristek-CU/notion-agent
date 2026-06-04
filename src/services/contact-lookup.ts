@@ -2,7 +2,23 @@
 // Service untuk lookup kontak berdasarkan nomor HP atau nama.
 // Digunakan untuk inbound caller ID dan outbound notifikasi PIC.
 
-import contactsData from "../config/contacts.json";
+import fs from "fs";
+import path from "path";
+
+// Load contacts at runtime instead of static import
+// This allows contacts.json to be gitignored while CI still builds
+function loadContactsData(): Contact[] {
+  try {
+    const contactsPath = path.resolve(__dirname, "../config/contacts.json");
+    const raw = fs.readFileSync(contactsPath, "utf-8");
+    return JSON.parse(raw) as Contact[];
+  } catch {
+    console.warn("[ContactLookup] contacts.json not found or invalid — using empty list");
+    return [];
+  }
+}
+
+const contactsData: Contact[] = loadContactsData();
 
 export interface Contact {
   name: string;
